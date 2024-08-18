@@ -12,7 +12,7 @@ from pathlib import Path
 CURRENT_DIR = Path(__file__).parent
 PJROOT_DIR = CURRENT_DIR.parent
 WORKSPACE_DIR = PJROOT_DIR.parent
-SETTINGS_DIR = WORKSPACE_DIR / "settings"
+SETTINGS_DIR = WORKSPACE_DIR / "settings_wequant"
 
 # import objects
 import os

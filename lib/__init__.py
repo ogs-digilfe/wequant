@@ -11,7 +11,7 @@ sys.path.append(str(WORKSPACE_DIR))
 
 
 import requests, os
-from settings import SERVER_HOST, PORT, USERNAME, PASSWORD
+from settings_wequant import SERVER_HOST, PORT, USERNAME, PASSWORD
 
 BASE_URL = f'http://{SERVER_HOST}:{PORT}'
 

@@ -34,6 +34,12 @@ class PricelistPl():
         
         self.df = pl.read_parquet(fp)
     
+    # colで指定した列のterm日の移動平均列を、25日移動平均であれば、ma25の
+    # ような列名(maの後ろに移動平均の日数)で追加する。
+    # termで指定した日数での移動平均が計算できない初期のレコードは、dropされてなくなる
+    # 全データで実施すると、かなりメモリを消費するので、200日移動平均などを取得する場合は、
+    # PricelistPl(filename).dfをfilterしてから実施しないとメモリが足りなくなるかもしれない。
+    # メモリが不足して実行プロセスがダウンした場合は、例外も出力されない。
     def with_columns_moving_average(self, term, col="p_close"):
         df = self.df
         
@@ -50,21 +56,44 @@ class PricelistPl():
         # mcode == mcode_rの行のみfilter(抽出)する
         df = df.filter(pl.col("mcode")==pl.col("mcode_r"))
         
-        # debug
-        print(df.columns)  
+        # 移動平均を計算
+        df = df.with_columns([pl.lit(0).alias("sum")])
+        for i in range(term):
+            col = f's{str(i)}'
+            df = df.with_columns([
+                (pl.col(col) + pl.col("sum")).alias("sum")
+            ])
+        moving_average_col_name = f'ma{term}'
+        df = df.with_columns([
+            (pl.col("sum") / pl.lit(term)).alias(moving_average_col_name)
+        ])
         
-        # 平均をとる
-        
-        
+        # 必要な列だけ残す
+        df = df.select(self.df.columns + [moving_average_col_name])
     
-    
-
+        self.df = df
+        
 # debug
 if __name__ == '__main__':
-    rawPL = PricelistPl("reviced_pricelist.parquet")
-    print(rawPL.df)
+    revPL = PricelistPl("reviced_pricelist.parquet")
+    print(revPL.df)
     
-    rawPL.with_columns_moving_average(25)
+    # dataを2020年以降に絞る
+    from datetime import date
+    df = revPL.df
+    df = df.filter(pl.col("p_key")>date(2020, 1, 1))
+    revPL.df = df
+
+    # 移動平均を計算して列を追加。ここでは25日、75日、200日
+    revPL.with_columns_moving_average(25)    
+    revPL.with_columns_moving_average(75)
+    revPL.with_columns_moving_average(200)
+    print(revPL.df)
+    
+    
+    
+    
+    
     
     
             
