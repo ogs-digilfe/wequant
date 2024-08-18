@@ -1,5 +1,5 @@
 requests
 pandas
-polars
+polars-lts-cpu
 pyarrow
 pydantic

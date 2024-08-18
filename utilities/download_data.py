@@ -14,14 +14,15 @@ from lib import Client
 
 # download可能なファイル
 DOWNLOADABLE_FILES = [
-    "rufus-4.5_x86.exe"
+    "raw_pricelist.parquet",
+    "reviced_pricelist.parquet"
 ]
 
 # fileのダウンロード
 client = Client()
 
 for f in DOWNLOADABLE_FILES:
-    client.download_wholefile(f)
+    client.download(f)
 
 fp = DATA_DIR/f
 client.upload(fp)

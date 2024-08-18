@@ -21,6 +21,11 @@ LOGIN_DATA = {
     # "password": "secret"
 }
 
+DOWNLOADABLE_FILES = [
+    "raw_pricelist.parquet",
+    "reviced_pricelist.parquet"
+]
+
 # ログインしてtokenを取得
 class Client():
     def __init__(self):
@@ -35,8 +40,21 @@ class Client():
         else:
             print(token_response)
             raise ValueError(f'status_code=401: ユーザー"{LOGIN_DATA["username"]}"の認証に失敗しました')
-            
     
+    # 差分ダウンロード
+    def download(self, filename):
+        # filenameが存在しなかったら全体をダウンロード
+        fp = str(DATA_DIR/filename)
+        if not os.path.exists(fp):
+            self.download_wholefile(filename)
+            return
+        
+        # fileが存在する場合は、差分をダウンロードする
+        
+        
+        
+                
+    # ファイル全体をダウンロード
     def download_wholefile(self, filename):
         route = "download"
         data_dir = str(DATA_DIR)
