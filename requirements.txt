@@ -3,3 +3,4 @@ pandas
 polars-lts-cpu
 pyarrow
 pydantic
+jupyterlab

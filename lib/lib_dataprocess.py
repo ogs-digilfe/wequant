@@ -11,16 +11,33 @@ sys.path.append(str(PJROOT_DIR))
 
 # オブジェクトのインポート
 import os
-from lib import DOWNLOADABLE_FILES
 import polars as pl
+from typing import Union
+
+# global
+DOWNLOADABLE_FILES = [
+    "finance_quote.parquet",
+    "kessan.parquet",
+    "meigaralist.parquet",
+    "nh225.parquet",
+    "raw_pricelist.parquet",
+    "reviced_pricelist.parquet"
+]
 
 class PricelistPl():
-    def __init__(self, filename):
-        fp = str(DATA_DIR/filename)
-        data_dir = str(DATA_DIR)
+    # fp = filenameの場合、dirはDATA_DIR
+    # fp = filepathの場合、fpはfilepathとして処理
+    def __init__(self, fp: Union[str, Path]):
+        fp = str(fp)
+        data_dir, filename = os.path.split(fp)
+        # filenameのみ指定された場合は、DATA_DIR
+        if data_dir == "":
+            data_dir = str(DATA_DIR)
+            fp = str(DATA_DIR/fp)
         
         # 管理対象外ファイルの場合、raise ValueError
-        if not filename in DOWNLOADABLE_FILES:
+        # ただし、tmp_で始まるfile名はok
+        if (not filename in DOWNLOADABLE_FILES) and (not "tmp_" in filename):
             raise ValueError(f'ファイル名{filename}は、wequantで管理していないファイルです。ファイル名を確認してください。')
         
         # ファイルをダウンロードしていなかったらraise FileNotFoundError
