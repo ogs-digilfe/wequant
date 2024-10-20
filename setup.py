@@ -37,7 +37,10 @@ def setup():
     
     # credential fileを作成
     with open(fp, "w", encoding="utf-8") as f:
-        json.dump(user_dct, f, indent=4)
+        credential = json.dumps(user_dct, indent=4)
+        content = f'DELIVER_USER = {credential}'
+        f.write(content)
+        
     
 if __name__ == "__main__":
     setup()
