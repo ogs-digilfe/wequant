@@ -25,7 +25,7 @@ if token_response.status_code == 200:
     token = token_response.json()["access_token"]
     print(f"Access token: {token}")
 
-    # ヘッダーにBearerトークンを追加して、/users/me2 にリクエストを送信
+    # ヘッダーにBearerトークンを追加して、/logintest にリクエストを送信
     headers = {
         "Authorization": f"Bearer {token}"
     }
@@ -35,7 +35,7 @@ if token_response.status_code == 200:
     if response.status_code == 200:
         print("User Info:", response.json())
     else:
-        print(f"Failed to access /users/me2: {response.status_code}, {response.text}")
+        print(f"Failed to access /logintest: {response.status_code}, {response.text}")
 
 
 else:
