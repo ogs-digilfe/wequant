@@ -25,7 +25,7 @@ LOGIN_DATA = {
     "password": PASSWORD
     # "password": "secret"
 }
-
+    
 # ログインしてtokenを取得
 class Client():
     def __init__(self):

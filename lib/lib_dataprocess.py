@@ -12,7 +12,7 @@ sys.path.append(str(PJROOT_DIR))
 # オブジェクトのインポート
 import os
 import polars as pl
-from typing import Union
+from typing import Union, Literal
 
 # global
 DOWNLOADABLE_FILES = [
@@ -24,32 +24,43 @@ DOWNLOADABLE_FILES = [
     "reviced_pricelist.parquet"
 ]
 
+# utility functions
+def read_data(fp: Union[str, Path]) -> pl.DataFrame:
+    fp = str(fp)
+    
+    return pl.read_parquet(fp)
+
+# private classes
 class PricelistPl():
     # fp = filenameの場合、dirはDATA_DIR
     # fp = filepathの場合、fpはfilepathとして処理
-    def __init__(self, fp: Union[str, Path]):
-        fp = str(fp)
-        data_dir, filename = os.path.split(fp)
-        # filenameのみ指定された場合は、DATA_DIR
-        if data_dir == "":
-            data_dir = str(DATA_DIR)
-            fp = str(DATA_DIR/fp)
-        
-        # 管理対象外ファイルの場合、raise ValueError
-        # ただし、tmp_で始まるfile名はok
-        if (not filename in DOWNLOADABLE_FILES) and (not "tmp_" in filename):
-            raise ValueError(f'ファイル名{filename}は、wequantで管理していないファイルです。ファイル名を確認してください。')
-        
-        # ファイルをダウンロードしていなかったらraise FileNotFoundError
-        utility_fp = str(PJROOT_DIR/"download_data.py")
-        if not os.path.exists(fp):
-            message = f'''
-            ファイル{filename}が、データ保存フォルダ{data_dir}にダウンロードされていません。
-            {utility_fp}を実行するなどしてデータをダウンロードしてください。
-            '''
-            raise ValueError(message)
-        
-        self.df = pl.read_parquet(fp)
+    # fp = pl.DataFrameの場合はそのままPricelistPl.dfにpl.DataFrameをセット
+    def __init__(self, fp: Union[str, Path, pl.DataFrame]):
+        if type(fp) == type(pl.DataFrame()):
+            self.df = fp
+        else:
+            fp = str(fp)
+            data_dir, filename = os.path.split(fp)
+            # filenameのみ指定された場合は、DATA_DIR
+            if data_dir == "":
+                data_dir = str(DATA_DIR)
+                fp = str(DATA_DIR/fp)
+            
+            # 管理対象外ファイルの場合、raise ValueError
+            # ただし、tmp_で始まるfile名はok
+            if (not filename in DOWNLOADABLE_FILES) and (not "tmp_" in filename):
+                raise ValueError(f'ファイル名{filename}は、wequantで管理していないファイルです。ファイル名を確認してください。')
+            
+            # ファイルをダウンロードしていなかったらraise FileNotFoundError
+            utility_fp = str(PJROOT_DIR/"download_data.py")
+            if not os.path.exists(fp):
+                message = f'''
+                ファイル{filename}が、データ保存フォルダ{data_dir}にダウンロードされていません。
+                {utility_fp}を実行するなどしてデータをダウンロードしてください。
+                '''
+                raise ValueError(message)
+            
+            self.df = pl.read_parquet(fp)
     
     # colで指定した列のterm日の移動平均列を、25日移動平均であれば、ma25の
     # ような列名(maの後ろに移動平均の日数)で追加する。
@@ -89,6 +100,26 @@ class PricelistPl():
         df = df.select(self.df.columns + [moving_average_col_name])
     
         self.df = df
+
+class KessanPl():
+    def __init__(self, df: pl.DataFrame):
+        # 列名を変更
+        df = df.rename({
+            "mcode": "code"
+        })
+        
+        self.df = df
+        
+    
+    def filter_settlement_type(self, settlement_type: Literal["quaterly", "yearly"]) -> None:
+        df = self.df
+        
+        if settlement_type == "quaterly":
+            t = "四"
+        elif settlement_type == "yearly":
+            t = "本"
+            
+        self.df = df.filter(pl.col("settlement_type")==t)
         
 # debug
 if __name__ == '__main__':
