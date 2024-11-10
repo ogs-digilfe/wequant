@@ -13,6 +13,8 @@ sys.path.append(str(PJROOT_DIR))
 import os
 import polars as pl
 from typing import Union, Literal
+from datetime import date
+from dateutil.relativedelta import relativedelta
 
 # global
 DOWNLOADABLE_FILES = [
@@ -120,6 +122,34 @@ class KessanPl():
             t = "本"
             
         self.df = df.filter(pl.col("settlement_type")==t)
+    
+    def filter_code(self, code: int) -> None:
+        self.df = self.df.filter(pl.col("code")==code)
+    
+    def get_latest_yearly_settlements(self, 
+            reference_date: date=date.today(),
+            settlement_type: Literal["本", "予"]="本"
+        ) -> pl.DataFrame:
+        df = self.df
+
+        df = df.filter(pl.col("settlement_type")==settlement_type)\
+            .filter(pl.col("announcement_date")<reference_date)
+        
+        df = df.with_columns([
+            pl.col("code").shift(-1).alias("tmp")
+        ])
+        
+        df = df.filter(pl.col("code")!=pl.col("tmp"))
+        
+        # 決算データの更新されているもののみを抽出する
+        term = relativedelta(months=13)
+        cut_date = reference_date - term
+        df = df.filter(pl.col("announcement_date")>=cut_date)
+        
+        df = df.drop(["tmp"])
+        
+        return df
+        
         
 # debug
 if __name__ == '__main__':
