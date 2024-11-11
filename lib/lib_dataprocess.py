@@ -10,7 +10,7 @@ DATA_DIR = PJROOT_DIR / "data"
 sys.path.append(str(PJROOT_DIR))
 
 # オブジェクトのインポート
-import os
+import os, calendar
 import polars as pl
 from typing import Union, Literal
 from datetime import date
@@ -26,11 +26,44 @@ DOWNLOADABLE_FILES = [
     "reviced_pricelist.parquet"
 ]
 
+DATEFORMAT = "%Y-%m-%d"
+
 # utility functions
 def read_data(fp: Union[str, Path]) -> pl.DataFrame:
     fp = str(fp)
     
     return pl.read_parquet(fp)
+
+# mapped functions
+# KessanPl
+def get_yearly_settlement_date(dataframe_raw) -> date:
+    r = dataframe_raw
+
+    settlement_date_idx = r[-2]
+    quater_idx = r[-1]
+
+
+    quater = r[quater_idx]
+    if quater == 1:
+        delta_m = 9
+    elif quater == 2:
+        delta_m = 6
+    elif quater == 3:
+        delta_m = 3
+    elif quater == 4:
+        delta_m = 0
+    else:
+        delta_m = 0
+
+    d0 = r[settlement_date_idx]
+    d1 = date(d0.year, d0.month, 1)
+    d1 += relativedelta(months=delta_m)
+
+    y = d1.year
+    m = d1.month
+    d = calendar.monthrange(y, m)[1]
+
+    return r+(date(y, m, d),)
 
 # private classes
 class PricelistPl():
@@ -149,24 +182,65 @@ class KessanPl():
         df = df.drop(["tmp"])
         
         return df
+
+    def with_columns_yearly_settlement_date(self) -> None:
+        df = self.df
+        original_cols = df.columns
+
+        # 最終行の1つ前にsettlement_dateの列indexを、
+        # 最終行にquaterの列indexを追加してget_yearly_settlement_dateで
+        # yearly_settlement_date列を追加できるようにする。
+        sd_idx = original_cols.index("settlement_date")
+        qt_idx = original_cols.index("quater")
+
+        df = df.with_columns([
+            pl.lit(sd_idx).alias("sd_idx"),
+            pl.lit(qt_idx).alias("qt_idx")
+        ])
+
+        df = df.map_rows(get_yearly_settlement_date)
+
+        # 列名を元に戻す
+        col_dct = {}
+        num_original_cols = len(self.df.columns)
+        for i in range(num_original_cols):
+            c1 = f"column_{str(i)}"
+            col_dct[c1] = original_cols[i]
         
+        # 最終列の列名を変更
+        num_new_cols = len(df.columns)
+        col_dct[f'column_{str(num_new_cols-1)}'] = "yearly_settlement_date"
+
+        # 計算のために追加したいらない列(sd_idxとqt_idx)を削除する
+        df = df.drop([
+            f'column_{str(num_new_cols-2)}',
+            f'column_{str(num_new_cols-3)}'
+        ])
+
+        self.df = df.rename(col_dct)
+
+    def with_columns_settlements_progress_rate(self) -> None:
+        # KessanPl.dfに年度決算日列を追加
+        self.with_columns_yearly_settlement_date()
+
+        # 決算実績と決算予想でdfを分割
+        df0 = self.df.filter(pl.col("settlement_type")!="予")
+        df1 = self.df.filter(pl.col("settlement_type") =="予")
+
+        # joinしてnull列を削除
+        df = df0.join(df1, on=["code", "yearly_settlement_date"], how="left")
+        df = df.filter(pl.col("settlement_type_right")=="予")
+
+        # レコードの決算発表時に発表済のレコードのみ抽出
+        df = df.filter(pl.col("announcement_date")>pl.col("announcement_date_right"))
+
+        self.df = df
+
         
 # debug
 if __name__ == '__main__':
-    revPL = PricelistPl("reviced_pricelist.parquet")
-    print(revPL.df)
-    
-    # dataを2020年以降に絞る
-    from datetime import date
-    df = revPL.df
-    df = df.filter(pl.col("p_key")>date(2020, 1, 1))
-    revPL.df = df
-
-    # 移動平均を計算して列を追加。ここでは25日、75日、200日
-    revPL.with_columns_moving_average(25)    
-    revPL.with_columns_moving_average(75)
-    revPL.with_columns_moving_average(200)
-    print(revPL.df)
+    ysd = get_yearly_settlement_date(date(2024, 9, 30), 4)
+    print(ysd)
     
     
     
