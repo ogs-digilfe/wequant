@@ -313,6 +313,43 @@ class KessanPl():
         self.df = df
 
 
+    def with_columns_expected_quatery_settlements_progress_rate(self, valuation_date: date=date.today()) -> None:
+        # 四半期単体決算のsales～filal_profitの同一決算期における累積列を追加
+        self.with_columns_accumulated_quaterly_settlement()
+
+        # 決算発表日はvaludation_dateよりも前
+        df = self.df
+        df = df.filter(pl.col("announcement_date")<valuation_date)
+
+        # yearly_settlement_dateはvaludation_date以降
+        df = df.filter(pl.col("yearly_settlement_date")>=valuation_date)
+
+        # valuation_date直近の決算予想dfのみ抽出
+        exdf = df.filter(pl.col("settlement_type")=="予")
+        exdf = exdf.group_by(["code", "yearly_settlement_date"]).agg([
+            pl.col("settlement_date").last().alias("settlement_date"),
+            pl.col("settlement_type").last().alias("settlement_type"),
+            pl.col("announcement_date").last().alias("announcement_date"),
+            pl.col("sales").last().alias("sales"),
+            pl.col("operating_income").last().alias("operating_income"),
+            pl.col("ordinary_profit").last().alias("ordinary_profit"),
+            pl.col("final_profit").last().alias("filan_profit")
+        ])
+
+        # 決算予想と決算予想決算期対象の四半期決算を連結
+        qdf = df.filter(pl.col("settlement_type")=="四")
+        df = qdf.join(exdf, on=["code", "yearly_settlement_date"], how="left")
+
+        # 決算進捗率列を追加
+        # ここから
+
+        
+
+        self.df = df
+
+
+
+
     # 作りかけ
     def with_columns_settlements_progress_rate(self) -> None:
         # KessanPl.dfに年度決算日列を追加
