@@ -219,6 +219,102 @@ class KessanPl():
 
         self.df = df.rename(col_dct)
 
+    def with_columns_accumulated_quaterly_settlement(self) -> None:
+        # KessanPl.dfに年度決算日列を追加
+        self.with_columns_yearly_settlement_date()
+
+        df = self.df
+        tcol = "settlement_type"
+        target_cols = ["sales", "operating_income", "ordinary_profit", "final_profit"]
+        on_keys = ["code", "yearly_settlement_date"]
+
+        pdfs = []
+
+        # 年度決算レコード(四半期決算以外)
+        # sales ～ final_profitをコピーするだけ
+        y_df = df.filter(pl.col(tcol)!="四")
+        for c in target_cols:
+            y_df = y_df.with_columns([
+                pl.col(c).alias(f'acc_{c}')
+            ])
+        pdfs.append(y_df)
+        
+        # 第1四半期決算レコード
+        # sales ～ final_profitをコピーするだけ
+        qcol = "quater"
+        q1df = df.filter(pl.col(qcol)==1)
+        for c in target_cols:
+            q1df = q1df.with_columns([
+                pl.col(c).alias(f'acc_{c}')
+            ])
+        
+        q1_df = q1df
+        pdfs.append(q1_df)
+        
+        # 第4四半期決算レコード
+        # 本決算からコピー
+        original_cols = self.df.columns
+        q4df = df.filter(pl.col(tcol)=="四").filter(pl.col(qcol)==4)
+        qydf = df.filter(pl.col(tcol)=="本")
+        pdf = q4df.join(qydf, on=on_keys, how="left")
+        colmap = {}
+        added_cols = []
+        for c in target_cols:
+            added_col = f'acc_{c}'
+            colmap[f'{c}_right'] = added_col
+            added_cols.append(added_col)
+        pdf = pdf.rename(colmap)
+        pdf = pdf.select(original_cols+added_cols)
+
+        q4_df = pdf
+        pdfs.append(q4_df)
+
+        # 第2四半期、第3四半期
+        q1df = df.filter(pl.col(qcol)==1)
+        q2df = df.filter(pl.col(qcol)==2)
+        q3df = df.filter(pl.col(qcol)==3)
+
+        # 第2四半期(後ろに前を連結するのでhowはrightにして、なるべくnull値がないようにする)
+        pdf = q2df.join(q1df, on=on_keys, how="right")
+
+        for c in target_cols:
+            pdf = pdf.with_columns([
+                (pl.col(c)+pl.col(f'{c}_right')).alias(f'acc_{c}')
+            ])
+        pdf = pdf.select(original_cols+added_cols)
+        q2_df = pdf
+        pdfs.append(q2_df)
+
+        # 第3四半期
+        pdf = q3df.join(q2_df, on=on_keys, how="right")
+
+        for c in target_cols:
+            pdf = pdf.with_columns([
+                (pl.col(c)+pl.col(f'acc_{c}')).alias(f'acc_{c}')
+            ])
+        pdf = pdf.select(original_cols+added_cols)
+        q3_df = pdf
+        pdfs.append(q3_df)
+
+        # 各部分dfをconcat
+        df = pdfs[0]
+        for adf in pdfs[1:]:
+            df = pl.concat([df, adf])
+        
+        # sort
+        df = df.sort([
+            pl.col("code"),
+            pl.col("settlement_type"),
+            pl.col("announcement_date")
+        ])
+
+        # nullは削除する
+        df = df.drop_nulls()
+
+        self.df = df
+
+
+    # 作りかけ
     def with_columns_settlements_progress_rate(self) -> None:
         # KessanPl.dfに年度決算日列を追加
         self.with_columns_yearly_settlement_date()
@@ -233,6 +329,8 @@ class KessanPl():
 
         # レコードの決算発表時に発表済のレコードのみ抽出
         df = df.filter(pl.col("announcement_date")>pl.col("announcement_date_right"))
+
+
 
         self.df = df
 
