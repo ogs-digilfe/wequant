@@ -247,7 +247,6 @@ class KessanPl():
             q1df = q1df.with_columns([
                 pl.col(c).alias(f'acc_{c}')
             ])
-        
         q1_df = q1df
         pdfs.append(q1_df)
         
