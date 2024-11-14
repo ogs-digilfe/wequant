@@ -183,7 +183,83 @@ class KessanPl():
         
         return df
     
-    # evaluation_dateで指定した日における、決算進捗率が取得可能な全銘柄の四半期決算進捗率をpl.DataFrame取得する
+    # 年度決算の実績値における、当該年度の四半期決算の進捗率をpl.DataFrameで作成し、返す
+    def get_actual_quatery_settlements_progress_rate(self) -> pl.DataFrame:
+        # 四半期単体決算のsales～filal_profitの同一決算期における累積列を追加
+        self.with_columns_accumulated_quaterly_settlement()
+        df = self.df
+
+        # 本決算(年度決算)のみ抽出
+        ydf = df.filter(pl.col("settlement_type")=="本")
+
+        # 四半期決算のみ抽出
+        qdf = df.filter(pl.col("settlement_type")=="四")
+
+        # 四半期決算と本決算を連結
+        df = qdf.join(ydf, on=["code", "yearly_settlement_date"], how="left")
+
+        # nullは削除する
+        df = df.drop_nulls()
+
+        # 決算進捗率列を追加
+        target_cols = [
+            "sales",
+            "operating_income",
+            "ordinary_profit",
+            "final_profit"
+        ]
+        for c in target_cols:
+            df = df.with_columns([
+                (100*pl.col(f'acc_{c}')/pl.col(f'{c}_right')).round(1).alias(f'{c}_pr(%)')
+            ])
+
+        # 列の絞り込み
+        selected_cols = [
+            "code",
+            "settlement_date",
+            "yearly_settlement_date",
+            "quater",
+            "announcement_date",
+            "sales_pr(%)",
+            "operating_income_pr(%)",
+            "ordinary_profit_pr(%)",
+            "final_profit_pr(%)",
+            "acc_sales",
+            "acc_operating_income",
+            "acc_ordinary_profit",
+            "acc_final_profit",
+            "announcement_date_right",	
+            "sales_right",
+            "operating_income_right",
+            "ordinary_profit_right",
+            "final_profit_right"	
+        ]
+        df = df.select(selected_cols)
+
+        # 列名を変更
+        rename_target_cols = selected_cols[-5:]
+        rename_map = {}
+        for c in rename_target_cols:
+            rename_map[c] = f'yearly_{c.replace("_right", "")}'
+        rename_map["acc_sales"] = "q_sales"
+        rename_map["acc_operating_income"] = "q_operating_income"
+        rename_map["acc_ordinary_profit"] = "q_ordinary_profit"
+        rename_map["acc_final_profit"] = "q_final_profit"
+
+        df = df.rename(rename_map)
+
+        # 冒頭のwith_columns_accumulated_quaterly_settlementで計算のために追加した列を削除する
+        self.df = self.df.select(self.df.columns[:-5])
+
+        return df
+
+
+
+
+
+
+
+    # evaluation_dateで指定した日における、決算進捗率が取得可能な全銘柄の四半期決算進捗率をpl.DataFrameで作成し、返す
     # 進捗率は、evaluation_date時における当期最新決算予想に対する四半期決算の進捗率。
     def get_expected_quatery_settlements_progress_rate(self, valuation_date: date=date.today()) -> pl.DataFrame:
         # 四半期単体決算のsales～filal_profitの同一決算期における累積列を追加
