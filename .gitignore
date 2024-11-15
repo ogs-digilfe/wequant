@@ -7,3 +7,5 @@ __pycache__
 **/data/
 **/tmp_data/
 **/settings/
+**/dev/
+**/iframe_figures/

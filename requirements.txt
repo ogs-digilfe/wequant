@@ -4,3 +4,4 @@ polars-lts-cpu
 pyarrow
 pydantic
 jupyterlab
+plotly

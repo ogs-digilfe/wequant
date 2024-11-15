@@ -65,6 +65,8 @@ def get_yearly_settlement_date(dataframe_raw) -> date:
 
     return r+(date(y, m, d),)
 
+
+
 # private classes
 class PricelistPl():
     # fp = filenameの場合、dirはDATA_DIR
@@ -524,9 +526,23 @@ class KessanPl():
         # レコードの決算発表時に発表済のレコードのみ抽出
         df = df.filter(pl.col("announcement_date")>pl.col("announcement_date_right"))
 
-
-
         self.df = df
+
+class MeigaralistPl():
+    def __init__(self, df: pl.DataFrame):
+        # 列名を変更
+        df = df.rename({
+            "mcode": "code",
+            "mname": "name"
+        })
+        
+        self.df = df
+    
+    # 証券コードから、会社名を取得して返す
+    def get_name(self, code: int) -> str:
+        return self.df.filter(pl.col("code")==code).select(["name"]).to_series().item()
+
+
 
         
 # debug
