@@ -19,6 +19,7 @@ from dateutil.relativedelta import relativedelta
 import plotly.graph_objects as go
 import plotly.io as pio
 from plotly.subplots import make_subplots
+from plotly.graph_objects import Figure
 
 # global
 DOWNLOADABLE_FILES = [
@@ -41,7 +42,7 @@ def read_data(fp: Union[str, Path]) -> pl.DataFrame:
 # plotly return graph object functions
 # codeで指定した銘柄のevaluation_dateで指定した時点での最新の年度決算予想に基づく
 # 売上高~純利益の決算進捗率を円グラフで表示するためのfigを返す
-def get_fig_expected_performance_progress_rate_pycharts(code: int, evaluation_date: date=date.today()):
+def get_fig_expected_performance_progress_rate_pycharts(code: int, evaluation_date: date=date.today()) -> Figure:
     fp1 = DATA_DIR / "kessan.parquet"
     fp2 = DATA_DIR / "meigaralist.parquet"
     df1 = read_data(fp1)
