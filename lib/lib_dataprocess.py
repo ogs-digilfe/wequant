@@ -12,9 +12,13 @@ sys.path.append(str(PJROOT_DIR))
 # オブジェクトのインポート
 import os, calendar
 import polars as pl
+import pandas as pd
 from typing import Union, Literal
 from datetime import date
 from dateutil.relativedelta import relativedelta
+import plotly.graph_objects as go
+import plotly.io as pio
+from plotly.subplots import make_subplots
 
 # global
 DOWNLOADABLE_FILES = [
@@ -33,6 +37,98 @@ def read_data(fp: Union[str, Path]) -> pl.DataFrame:
     fp = str(fp)
     
     return pl.read_parquet(fp)
+
+# plotly return graph object functions
+# codeで指定した銘柄のevaluation_dateで指定した時点での最新の年度決算予想に基づく
+# 売上高~純利益の決算進捗率を円グラフで表示するためのfigを返す
+def get_fig_expected_performance_progress_rate_pycharts(code: int, evaluation_date: date=date.today()):
+    fp1 = DATA_DIR / "kessan.parquet"
+    fp2 = DATA_DIR / "meigaralist.parquet"
+    df1 = read_data(fp1)
+    KPL = KessanPl(df1)
+    df2 = read_data(fp2)
+    MPL = MeigaralistPl(df2)
+
+    df = KPL.get_expected_quatery_settlements_progress_rate(evaluation_date)
+    df = df.filter(pl.col("code")==code)
+    df = df.select([
+        "code",
+        'yearly_settlement_date',
+        "quater",
+        "sales_pr(%)",
+        "operating_income_pr(%)",
+        "ordinary_profit_pr(%)",
+        "final_profit_pr(%)"
+    ])
+
+    pandas_df = df.to_pandas()
+    df = pandas_df
+    name = MPL.get_name(code)
+    rec_idx = df.shape[0] - 1
+    fyear = df.loc[rec_idx, "yearly_settlement_date"]
+    quater = df.loc[rec_idx, "quater"]
+
+    # グラフ出力オプション
+    pio.renderers.default = 'iframe'
+
+    # 出力グラフのplot設定(1行4列 -> 横並びに4つ表示)
+    specs = [
+        [{"type": "pie"}, {"type": "pie"}, {"type": "pie"}, {"type": "pie"}]
+    ]
+    fig = make_subplots(rows=1, cols=4, specs=specs)
+
+    # pychartオブジェクトのセット
+    for i in range(4):
+        # pychartデータのセット(pandas.DataFrameにセットする)
+        labels = ["進捗率(%)", " "]
+        pr = df.loc[rec_idx, df.columns[i+3]]
+        
+        values = [pr, 100-pr]
+        chart_df_data = {
+            "labels": labels,
+            "values": values
+        }
+        chart_df = pd.DataFrame(chart_df_data)
+
+        # pychartオブジェクトの設定
+        data_set = go.Pie(
+            labels = chart_df["labels"],
+            values = chart_df["values"],
+            hole = 0.5,
+            sort = False,
+            marker = dict(colors=["aqua", "lightgrey"]),
+            textinfo='percent',  # 全体の表示設定
+            texttemplate=['%{percent}', '']
+        )
+        fig.add_trace(data_set, row=1, col=i+1)
+        
+    # レイアウトの設定
+    items = ["売上高進捗率(%)", "営業利益進捗率(%)", "経常利益進捗率(%)", "純利益進捗率(%)"]
+    left_gap = 0.07
+    right_gap = 0.93
+    gap_correction = 0.01
+    gap = (right_gap - left_gap) / 3
+    annotations = []
+    for i in range(4):
+        x = left_gap + gap * i
+        if i == 1:
+            x = x + gap_correction
+        elif i == 2:
+            x = x - gap_correction
+        annotations.append(
+            dict(text=items[i], x=x, y=0.5, font_size=12, showarrow=False)
+        )
+
+    # 設定したレイアウトをpychartオブジェクトにセット
+    fig.update_layout(
+        showlegend=False, # 凡例出力をoff
+        annotations=annotations
+    )
+
+    # 出力
+    print(f'{name}({code})の{fyear.year}年{fyear.month}月期第{quater}四半期決算進捗率(評価日：{evaluation_date})')
+
+    return fig
 
 # mapped functions
 # KessanPl
