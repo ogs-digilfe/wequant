@@ -257,7 +257,34 @@ class KessanPl():
     
     def filter_code(self, code: int) -> None:
         self.df = self.df.filter(pl.col("code")==code)
-    
+
+    # codeで指定した銘柄の年決算のリスト(履歴)を返す
+    # valuation_dateを指定すると、指定日時点までの年決算を返す。
+    # get_latest_forcast = Trueとした場合、valuation_date時点の最新の決算予想を返す
+    def get_target_stock_yearly_settlements(self, code: int, get_latest_forcast=True, valuation_date: date=date.today()) -> pl.DataFrame:
+        df = self.df
+        df = df.filter(pl.col("code")==code)\
+            .filter(pl.col("settlement_type")=="本")\
+            .filter(pl.col("announcement_date")<valuation_date)
+        
+        if not get_latest_forcast:
+            return df
+        
+        fdf = self.df
+        fdf = fdf.filter(pl.col("code")==code)\
+            .filter(pl.col("settlement_type")=="予")\
+            .filter(pl.col("settlement_date")>df["settlement_date"].max())
+        fdf = fdf.filter(pl.col("settlement_date")==pl.col("settlement_date").min())
+
+        rdf = pl.concat([df, fdf])
+
+        rdf = rdf.sort([pl.col("settlement_date")])
+        
+        return rdf
+
+
+        
+
     def get_latest_yearly_settlements(self, 
             reference_date: date=date.today(),
             settlement_type: Literal["本", "予"]="本"
@@ -604,7 +631,44 @@ class KessanPl():
 
         self.df = df
 
+    # 結果出力をしやすいように、決算期の表記を日本語にした列を追加
+    # add_settlement_type_string=Trueの場合、「〇年〇月期決算」決算の後ろに、決算種別を追加する。Falseの場合は〇年〇月期までしか表示しない。
+      # 本決算 -> 〇年〇月期通期決算
+      # 四半期決算 -> 〇年〇月第〇(単体|累積)四半期決算
+    # KessanPl.DataFrameに四半期決算データが単体データか累積データ化識別できないので、かっこわるいが指定する。
+    def with_columns_financtial_period(self, add_settlement_type_string=False, quaterly_settlement_type: Literal["単体", "累積"]="単体") -> None:
+        self.with_columns_yearly_settlement_date()
+        df = self.df
 
+        # quater値の修正
+        df = df.with_columns([
+            pl.when(pl.col("quater")==-2)
+            .then(4)
+            .otherwise(pl.col("quater")).alias("quater")
+        ])
+        
+        # 列を追加
+        df = df.with_columns([
+            (pl.col("yearly_settlement_date").dt.year()).alias("fy").cast(pl.Utf8),
+            (pl.col("yearly_settlement_date").dt.month()).alias("fm").cast(pl.Utf8),
+        ])
+
+        # 文字列を連結して列を追加
+        df = df.with_columns(
+            pl.concat_str(["fy", pl.lit("年"), "fm", pl.lit("月期")]).alias("決算期")
+        )
+
+        # 通期/四半期を追加
+        if add_settlement_type_string:
+            df = df.with_columns([
+                pl.when(pl.col("settlement_type")=="四")
+                .then(pl.col("決算期")+pl.lit("第")+pl.col("quater").cast(pl.Utf8)+pl.lit(quaterly_settlement_type)+pl.lit("四半期決算"))
+                .otherwise(pl.col("決算期")+pl.lit("通期決算"))
+                .alias("決算期")
+            ])
+
+
+        self.df = df
 
 
     # 作りかけ
