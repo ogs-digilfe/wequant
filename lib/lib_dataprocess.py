@@ -32,12 +32,48 @@ DOWNLOADABLE_FILES = [
 ]
 
 DATEFORMAT = "%Y-%m-%d"
+DATEFORMAT2 = "%Y年%m月%d日"
 
 # utility functions
 def read_data(fp: Union[str, Path]) -> pl.DataFrame:
     fp = str(fp)
     
     return pl.read_parquet(fp)
+
+# valuation_dateで指定した日の最新通期決算と決算予想をpl.DataFrameで返す
+def get_df_latest_yearly_performance(code: int, valuation_date: date=date.today()) -> pl.DataFrame:
+    fp = DATA_DIR/"kessan.parquet"
+    df = read_data(fp)
+    KPL = KessanPl(df)
+    KPL.with_columns_financtial_period()
+
+    df1 = KPL.get_latest_yearly_settlements(reference_date=valuation_date, settlement_type="予")
+    df1 = df1.with_columns([
+    (pl.col("決算期") + pl.lit("(予)")).alias("決算期")
+    ])
+
+    df2 = KPL.get_latest_yearly_settlements(reference_date=valuation_date, settlement_type="本")
+    df = pl.concat([df1, df2])
+    selected_cols = [df.columns[-1]] + df.columns[3:10]
+    df = df.filter(pl.col("code")==code)\
+        .select(selected_cols)
+
+    rename_map_dct = {
+        "announcement_date": "決算発表日",
+        "sales": "売上高",
+        "operating_income": "営業利益",
+        "ordinary_profit": "経常利益",
+        "final_profit": "純利益",
+        "reviced_eps": "EPS",
+        "dividend": "1株配当"
+    }
+    df = df.rename(rename_map_dct)
+
+    # 出力
+    companyname = get_companyname(code)
+    print(f'{companyname}({code})の通期決算(評価日：{valuation_date.strftime(DATEFORMAT2)})')
+
+    return df
 
 # plotly return graph object functions
 # codeで指定した銘柄のevaluation_dateで指定した時点での最新の年度決算予想に基づく
@@ -131,6 +167,133 @@ def get_fig_expected_performance_progress_rate_pycharts(code: int, evaluation_da
 
     return fig
 
+# codeで指定した銘柄の年度決算の業績推移のグラフ描画インスタンスfigを返す
+# valuation_dateを指定された日で評価できるようにグラフを描画する(過去時点の評価が可能)
+# get_latest_forcast = Trueとすると、valuation_date時点で公開された最新決算予想の業績データを追加する
+def get_fig_yearly_settlement_trend_barchart(code: int, valuation_date: date=date.today(), get_latest_forcast=True) -> Figure:
+    fp1 = DATA_DIR / "kessan.parquet"
+    df1 = read_data(fp1)
+
+    fp2 = DATA_DIR / "meigaralist.parquet"
+    df2 = read_data(fp2)
+
+    # valuation_dateで絞り込み
+    df1 = df1.filter(pl.col("announcement_date")<=valuation_date)
+
+    KPL = KessanPl(df1)
+
+    # xを決算期の表記に変更
+    KPL.with_columns_financtial_period()
+    df = KPL.df
+    df = df.filter(pl.col("code")==code)\
+        .filter(pl.col("settlement_type")=="本")
+
+    pandas_df = df.to_pandas()
+    sales_df = pandas_df[["決算期", "sales"]]
+
+    # 棒グラフを作成
+    # グラフ出力オプション
+    pio.renderers.default = 'iframe'
+
+    # 棒グラフのセット
+    graph_data = [
+        go.Bar(
+            x = sales_df["決算期"],
+            y = sales_df["sales"],
+            marker = dict(color="skyblue"),
+            name = "売上高"
+        )
+    ]
+    fig = go.Figure(graph_data)
+
+    # 決算予想は、色を変える
+    # valuation_dateにおける最新forcastを追加
+    if get_latest_forcast:
+        fdf = KPL.get_latest_yearly_settlements(
+                reference_date=valuation_date,
+                settlement_type="予"
+        )
+        fdf = fdf.filter(pl.col("code")==code)
+        fdf = fdf.with_columns([
+            (pl.col("決算期")+pl.lit("(予)")).alias("決算期")
+        ])
+        pandas_fdf = fdf.to_pandas()
+        fig.add_trace(go.Bar(
+            x = pandas_fdf["決算期"].iloc[-1:],
+            y = pandas_fdf["sales"].iloc[-1:],
+            name = "売上高(予)",
+            marker = dict(color="lightpink")
+            
+        ))
+
+    # 利益率を右軸をy軸として、折れ線グラフでトレース
+    # 営業利益率をトレース
+    all_df = pl.concat([df, fdf])
+    column_idx = 0
+    label_idx = 1
+    color_idx = 2
+    line_trace_cols_attrs = [
+        ['operating_income', '営業利益', 'orange'],
+        ['ordinary_profit', '経常利益', 'lightgreen'],
+        ['final_profit', '純利益', 'purple']
+    ]
+
+    for a in line_trace_cols_attrs:
+        fig.add_trace(go.Scatter(
+            x=all_df['決算期'],
+            y=all_df[a[column_idx]],
+            mode='lines',
+            name=a[label_idx],
+            yaxis = 'y2',
+            line=dict(color=a[color_idx], width=2)
+        ))
+
+    # レイアウトの設定
+    MPL = MeigaralistPl(df2)
+    company_name = MPL.get_name(code)
+    fig.update_layout(
+        title=f'{company_name}({code})通期業績推移({valuation_date.strftime(DATEFORMAT2)}時点)',
+        xaxis=dict(title='年度'),
+        yaxis=dict(title='売上高 (百万円)'),
+        yaxis2=dict(
+            title="利益(百万円)",
+            overlaying="y", # 左のY軸に重ねる
+            side="right"
+        ),
+        bargap=0.2  # 棒の間隔
+    )
+
+    return fig
+
+def get_companyname(code: int) -> str:
+    fp = DATA_DIR / "meigaralist.parquet"
+    df = read_data(fp)
+    MPL = MeigaralistPl(df)
+
+    return MPL.get_name(code)
+
+# 指定したcodeの最新株価(終値)を取得する
+# いつの最新かをvaludation_dateで指定できる(過去日)。
+# valudation_dateを指定した場合、株式分割は考慮されないので、要注意。
+def get_latest_stockprice(code: int, valudation_date: date=date.today()) -> float:
+    fp = DATA_DIR / "raw_pricelist.parquet"
+    df = read_data(fp)
+    df = PricelistPl(df).df
+
+    df = df.filter(pl.col("code")==code)\
+        .filter(pl.col("date")<=valudation_date)
+    df = df.filter(pl.col("date")==pl.col("date").max())
+
+    close = df.row(0)[5]
+    
+    # 出力
+    name = get_companyname(code)
+    dealing_date = df.row(0)[1].strftime(DATEFORMAT2)
+    print(f'{name}({code})の{dealing_date}終値')
+    
+    return close
+
+
 # mapped functions
 # KessanPl
 def get_yearly_settlement_date(dataframe_raw) -> date:
@@ -195,6 +358,17 @@ class PricelistPl():
                 raise ValueError(message)
             
             self.df = pl.read_parquet(fp)
+
+        rename_map_dct = {
+            "mcode": "code",
+            "p_key": "date",
+            "p_open": "open",
+            "p_high": "high",
+            "p_low": "low",
+            "p_close": "close"
+        }
+        self.df = self.df.rename(rename_map_dct)
+
     
     # colで指定した列のterm日の移動平均列を、25日移動平均であれば、ma25の
     # ような列名(maの後ろに移動平均の日数)で追加する。
@@ -202,7 +376,7 @@ class PricelistPl():
     # 全データで実施すると、かなりメモリを消費するので、200日移動平均などを取得する場合は、
     # PricelistPl(filename).dfをfilterしてから実施しないとメモリが足りなくなるかもしれない。
     # メモリが不足して実行プロセスがダウンした場合は、例外も出力されない。
-    def with_columns_moving_average(self, term, col="p_close"):
+    def with_columns_moving_average(self, term, col="close"):
         df = self.df
         
         # term数shiftする
@@ -212,11 +386,11 @@ class PricelistPl():
         last_col_shift_num = term - 1
         df = df.with_columns([
             pl.col(col).shift(last_col_shift_num).alias(f's{str(last_col_shift_num)}'),
-            pl.col("mcode").shift(last_col_shift_num).alias("mcode_r")
+            pl.col("code").shift(last_col_shift_num).alias("code_r")
         ])
         
         # mcode == mcode_rの行のみfilter(抽出)する
-        df = df.filter(pl.col("mcode")==pl.col("mcode_r"))
+        df = df.filter(pl.col("code")==pl.col("code_r"))
         
         # 移動平均を計算
         df = df.with_columns([pl.lit(0).alias("sum")])
