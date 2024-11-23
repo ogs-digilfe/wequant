@@ -1002,8 +1002,9 @@ class KessanFig():
         ):
         
         fp = DATA_DIR / "kessan.parquet"
-        df = read_data(fp)
-
+        self.original_df = read_data(fp)
+        df = self.original_df
+        
         df = df.rename({
             "mcode": "code"
         })
@@ -1024,6 +1025,8 @@ class KessanFig():
         self.code = code
         self.settlement_type = settlement_type
         self.start_settlement_date = start_settlement_date
+        self.end_settlement_date = end_settlement_date
+        
         today = date.today()
         if end_settlement_date >= today:
             self.end_settlement_date = today
@@ -1035,8 +1038,55 @@ class KessanFig():
         if output_target == "jupyter":
             pio.renderers.default = 'iframe'
         
-        # 棒グラフ
-        self.fig = self.yearly_settlement_trend_barchart()
+        # 売上高棒グラフのグラフオブジェクトを生成
+        if settlement_type == "通期":
+            self.fig = self.yearly_settlement_trend_barchart()
+        elif settlement_type == "四半期":
+            self.fig = self.quaterly_settlement_trend_barchart()
+    
+    def quaterly_settlement_trend_barchart(self) -> Figure:
+        df = self.df
+
+        # x軸のラベル用に列をカスタマイズして追加
+        df = df.with_columns([
+            pl.col("quater").cast(pl.Utf8),
+            pl.col("fy").cast(pl.Utf8),
+            pl.col("fm").cast(pl.Utf8)
+        ])
+        df = df.with_columns([
+            (pl.col("fy")+pl.lit("-")+pl.col("fm")+pl.lit("-")+pl.col("quater")+pl.lit("Q")).alias("xlabels")
+        ])
+
+        pandas_df = df.to_pandas()
+        sales_df = pandas_df[["xlabels", "sales"]]
+
+        # 棒グラフのセット
+        graph_data = [
+            go.Bar(
+                x = sales_df["xlabels"],
+                y = sales_df["sales"],
+                marker = dict(color="skyblue"),
+                name = "売上高"
+            )
+        ]
+        fig = go.Figure(graph_data)
+
+        # グラフレイアウトの設定
+        fig.update_layout(
+            title=f'{self.name}({self.code})四半期業績推移({self.end_settlement_date.strftime(DATEFORMAT2)}時点)',
+            xaxis=dict(title='年度'),
+            yaxis=dict(title='売上高 (百万円)'),
+            legend=dict(
+                x=1.05,  # 凡例をグラフの外側に配置
+                y=1,    # 上部に配置
+                xanchor='left',  # 凡例の左端をx座標に揃える
+                yanchor='top'    # 凡例の上端をy座標に揃える
+            ),
+            bargap=0.2  # 棒の間隔
+        )
+        
+        return fig
+        
         
     def yearly_settlement_trend_barchart(self) -> Figure:
         df = self.df
@@ -1053,7 +1103,35 @@ class KessanFig():
             )
         ]
         fig = go.Figure(graph_data)
+
+        # self.end_settlement_dateにおける最新forcastを追加
+        KPL = KessanPl(self.original_df)
+        fdf = KPL.get_latest_yearly_settlements(
+                reference_date=self.end_settlement_date,
+                settlement_type="予"
+        )
+        fdf = fdf.filter(pl.col("code")==self.code)
+        KPL = KessanPl(fdf)
+        KPL.with_columns_financtial_period()
+        fdf = KPL.df
+        fdf = fdf.with_columns([
+            (pl.col("決算期")+pl.lit("(予)")).alias("決算期")
+        ])
         
+        # 他のメソッドで利用するために決算予想をconcatする
+        self.df = pl.concat([self.df, fdf])
+        
+        # 元のグラフオブジェクトに決算予想の売上高をadd_traceする
+        pandas_fdf = fdf.to_pandas()
+        fig.add_trace(go.Bar(
+            x = pandas_fdf["決算期"].iloc[-1:],
+            y = pandas_fdf["sales"].iloc[-1:],
+            name = "売上高(予)",
+            marker = dict(color="lightpink")
+            
+        ))
+
+        # グラフレイアウトの設定
         fig.update_layout(
             title=f'{self.name}({self.code})通期業績推移({self.end_settlement_date.strftime(DATEFORMAT2)}時点)',
             xaxis=dict(title='年度'),
@@ -1068,6 +1146,8 @@ class KessanFig():
         )
         
         return fig
+    
+
 
         
 # debug
