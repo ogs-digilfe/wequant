@@ -524,9 +524,10 @@ class PricelistPl():
 class KessanPl():
     def __init__(self, df: pl.DataFrame):
         # 列名を変更
-        df = df.rename({
-            "mcode": "code"
-        })
+        if "mcode" in df.columns:
+            df = df.rename({
+                "mcode": "code"
+            })
         
         self.df = df
         
@@ -990,6 +991,83 @@ class MeigaralistPl():
         return self.df.filter(pl.col("code")==code).select(["name"]).to_series().item()
 
 
+# 決算推移グラフを描画する
+class KessanFig():
+    def __init__(self, 
+            code: int, 
+            settlement_type: Literal["通期", "四半期"], 
+            output_target: str,
+            start_settlement_date: date = date(1900, 1, 1),
+            end_settlement_date: date = date(2999, 12, 31)
+        ):
+        
+        fp = DATA_DIR / "kessan.parquet"
+        df = read_data(fp)
+
+        df = df.rename({
+            "mcode": "code"
+        })
+        
+        if settlement_type == "通期":
+            st = "本"
+        elif settlement_type == "四半期":
+            st = "四"
+        
+        df = df.filter(pl.col("code")==code)\
+            .filter(pl.col("settlement_type")==st)\
+            .filter(pl.col("settlement_date")>=start_settlement_date)\
+            .filter(pl.col("settlement_date")<=end_settlement_date)
+        KPL = KessanPl(df)
+        KPL.with_columns_financtial_period()
+        self.df = KPL.df
+        
+        self.code = code
+        self.settlement_type = settlement_type
+        self.start_settlement_date = start_settlement_date
+        today = date.today()
+        if end_settlement_date >= today:
+            self.end_settlement_date = today
+        else:
+            self.end_settlement_date = end_settlement_date
+        self.name = get_companyname(code)
+        
+        # jupyterにグラフを描画する場合は、pio.renderers.defalutを'iframe'に設定する 
+        if output_target == "jupyter":
+            pio.renderers.default = 'iframe'
+        
+        # 棒グラフ
+        self.fig = self.yearly_settlement_trend_barchart()
+        
+    def yearly_settlement_trend_barchart(self) -> Figure:
+        df = self.df
+        df = df.select(["決算期", "sales"])
+        sales_df = df.to_pandas()
+        
+        # 棒グラフのセット
+        graph_data = [
+            go.Bar(
+                x = sales_df["決算期"],
+                y = sales_df["sales"],
+                marker = dict(color="skyblue"),
+                name = "売上高"
+            )
+        ]
+        fig = go.Figure(graph_data)
+        
+        fig.update_layout(
+            title=f'{self.name}({self.code})通期業績推移({self.end_settlement_date.strftime(DATEFORMAT2)}時点)',
+            xaxis=dict(title='年度'),
+            yaxis=dict(title='売上高 (百万円)'),
+            legend=dict(
+                x=1.05,  # 凡例をグラフの外側に配置
+                y=1,    # 上部に配置
+                xanchor='left',  # 凡例の左端をx座標に揃える
+                yanchor='top'    # 凡例の上端をy座標に揃える
+            ),
+            bargap=0.2  # 棒の間隔
+        )
+        
+        return fig
 
         
 # debug
