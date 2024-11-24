@@ -167,216 +167,6 @@ def get_fig_expected_performance_progress_rate_pycharts(code: int, evaluation_da
 
     return fig
 
-# codeで指定した銘柄の四半期決算の業績推移のグラフ描画インスタンスfigを返す
-# valuation_dateを指定された日で評価できるようにグラフを描画する(過去時点の評価が可能)
-def get_fig_quaterly_settlement_trend_barchart(code: int, valuation_date: date=date.today()) -> Figure:
-    # dataの読み込み
-    fp1 = DATA_DIR / "kessan.parquet"
-    df1 = read_data(fp1)
-
-    fp2 = DATA_DIR / "meigaralist.parquet"
-    df2 = read_data(fp2)
-
-    # valuation_dateで絞り込み
-    df1 = df1.filter(pl.col("announcement_date")<=valuation_date)
-
-    KPL = KessanPl(df1)
-
-    # xを決算期の表記に変更してcodeで指定した銘柄の四半期決算を抽出
-    KPL.with_columns_financtial_period()
-    df = KPL.df
-    df = df.filter(pl.col("code")==code)\
-        .filter(pl.col("settlement_type")=="四")
-
-    #
-    # 売上高のbarchartをセット
-    #
-    # x軸のラベル用に列をカスタマイズして追加
-    df = df.with_columns([
-        pl.col("quater").cast(pl.Utf8),
-        pl.col("fy").cast(pl.Utf8),
-        pl.col("fm").cast(pl.Utf8)
-    ])
-    df = df.with_columns([
-        (pl.col("fy")+pl.lit("-")+pl.col("fm")+pl.lit("-")+pl.col("quater")+pl.lit("Q")).alias("xlabels")
-    ])
-
-    pandas_df = df.to_pandas()
-    sales_df = pandas_df[["xlabels", "sales"]]
-
-    # グラフ出力オプション
-    pio.renderers.default = 'iframe'
-
-    # 棒グラフのセット
-    graph_data = [
-        go.Bar(
-            x = sales_df["xlabels"],
-            y = sales_df["sales"],
-            marker = dict(color="skyblue"),
-            name = "売上高"
-        )
-    ]
-    fig = go.Figure(graph_data)
-
-    # 利益率を右軸をy軸として、折れ線グラフでトレース
-    column_idx = 0
-    label_idx = 1
-    color_idx = 2
-    line_trace_cols_attrs = [
-        ['operating_income', '営業利益', 'orange'],
-        ['ordinary_profit', '経常利益', 'lightgreen'],
-        ['final_profit', '純利益', 'purple']
-    ]
-
-    for a in line_trace_cols_attrs:
-        fig.add_trace(go.Scatter(
-            x=pandas_df['xlabels'],
-            y=pandas_df[a[column_idx]],
-            mode='lines',
-            name=a[label_idx],
-            yaxis = 'y2',
-            line=dict(color=a[color_idx], width=2)
-        ))
-
-    # 年度の区切り線を引く
-    q4_df = pandas_df[pandas_df["quater"]=="4"]
-    vline_x_positions = q4_df.index
-    for q4x in vline_x_positions:
-        xpos = int(q4x) + 0.5
-        
-        fig.add_vline(
-            x=xpos,  # 棒の間に対応する位置
-            line=dict(color='gray', width=2),
-            annotation_text="",  # ラベル（任意）
-            annotation_position="top"
-        )
-
-    # レイアウトの設定
-    MPL = MeigaralistPl(df2)
-    company_name = MPL.get_name(code)
-    fig.update_layout(
-        title=f'{company_name}({code})四半期業績推移({valuation_date.strftime(DATEFORMAT2)}時点)',
-        xaxis=dict(title='年度'),
-        yaxis=dict(title='売上高 (百万円)'),
-        yaxis2=dict(
-            title="利益(百万円)",
-            overlaying="y", # 左のY軸に重ねる
-            side="right"
-        ),
-        legend=dict(
-            x=1.05,  # 凡例をグラフの外側に配置
-            y=1,    # 上部に配置
-            xanchor='left',  # 凡例の左端をx座標に揃える
-            yanchor='top'    # 凡例の上端をy座標に揃える
-        ),
-        bargap=0.2  # 棒の間隔
-    )
-
-    return fig
-
-# codeで指定した銘柄の年度決算の業績推移のグラフ描画インスタンスfigを返す
-# valuation_dateを指定された日で評価できるようにグラフを描画する(過去時点の評価が可能)
-# get_latest_forcast = Trueとすると、valuation_date時点で公開された最新決算予想の業績データを追加する
-def get_fig_yearly_settlement_trend_barchart(code: int, valuation_date: date=date.today(), get_latest_forcast=True) -> Figure:
-    fp1 = DATA_DIR / "kessan.parquet"
-    df1 = read_data(fp1)
-
-    fp2 = DATA_DIR / "meigaralist.parquet"
-    df2 = read_data(fp2)
-
-    # valuation_dateで絞り込み
-    df1 = df1.filter(pl.col("announcement_date")<=valuation_date)
-
-    KPL = KessanPl(df1)
-
-    # xを決算期の表記に変更
-    KPL.with_columns_financtial_period()
-    df = KPL.df
-    df = df.filter(pl.col("code")==code)\
-        .filter(pl.col("settlement_type")=="本")
-
-    pandas_df = df.to_pandas()
-    sales_df = pandas_df[["決算期", "sales"]]
-
-    # 棒グラフを作成
-    # グラフ出力オプション
-    pio.renderers.default = 'iframe'
-
-    # 棒グラフのセット
-    graph_data = [
-        go.Bar(
-            x = sales_df["決算期"],
-            y = sales_df["sales"],
-            marker = dict(color="skyblue"),
-            name = "売上高"
-        )
-    ]
-    fig = go.Figure(graph_data)
-
-    # 決算予想は、色を変える
-    # valuation_dateにおける最新forcastを追加
-    if get_latest_forcast:
-        fdf = KPL.get_latest_yearly_settlements(
-                reference_date=valuation_date,
-                settlement_type="予"
-        )
-        fdf = fdf.filter(pl.col("code")==code)
-        fdf = fdf.with_columns([
-            (pl.col("決算期")+pl.lit("(予)")).alias("決算期")
-        ])
-        pandas_fdf = fdf.to_pandas()
-        fig.add_trace(go.Bar(
-            x = pandas_fdf["決算期"].iloc[-1:],
-            y = pandas_fdf["sales"].iloc[-1:],
-            name = "売上高(予)",
-            marker = dict(color="lightpink")
-            
-        ))
-
-    # 利益率を右軸をy軸として、折れ線グラフでトレース
-    all_df = pl.concat([df, fdf])
-    column_idx = 0
-    label_idx = 1
-    color_idx = 2
-    line_trace_cols_attrs = [
-        ['operating_income', '営業利益', 'orange'],
-        ['ordinary_profit', '経常利益', 'lightgreen'],
-        ['final_profit', '純利益', 'purple']
-    ]
-
-    for a in line_trace_cols_attrs:
-        fig.add_trace(go.Scatter(
-            x=all_df['決算期'],
-            y=all_df[a[column_idx]],
-            mode='lines',
-            name=a[label_idx],
-            yaxis = 'y2',
-            line=dict(color=a[color_idx], width=2)
-        ))
-
-    # レイアウトの設定
-    MPL = MeigaralistPl(df2)
-    company_name = MPL.get_name(code)
-    fig.update_layout(
-        title=f'{company_name}({code})通期業績推移({valuation_date.strftime(DATEFORMAT2)}時点)',
-        xaxis=dict(title='年度'),
-        yaxis=dict(title='売上高 (百万円)'),
-        yaxis2=dict(
-            title="利益(百万円)",
-            overlaying="y", # 左のY軸に重ねる
-            side="right"
-        ),
-        legend=dict(
-            x=1.05,  # 凡例をグラフの外側に配置
-            y=1,    # 上部に配置
-            xanchor='left',  # 凡例の左端をx座標に揃える
-            yanchor='top'    # 凡例の上端をy座標に揃える
-        ),
-        bargap=0.2  # 棒の間隔
-    )
-
-    return fig
-
 def get_companyname(code: int) -> str:
     fp = DATA_DIR / "meigaralist.parquet"
     df = read_data(fp)
@@ -996,7 +786,7 @@ class KessanFig():
     def __init__(self, 
             code: int, 
             settlement_type: Literal["通期", "四半期"], 
-            output_target: str,
+            output_target: str = "jupyter",
             start_settlement_date: date = date(1900, 1, 1),
             end_settlement_date: date = date(2999, 12, 31)
         ):
@@ -1056,6 +846,8 @@ class KessanFig():
         df = df.with_columns([
             (pl.col("fy")+pl.lit("-")+pl.col("fm")+pl.lit("-")+pl.col("quater")+pl.lit("Q")).alias("xlabels")
         ])
+        
+        self.df = df
 
         pandas_df = df.to_pandas()
         sales_df = pandas_df[["xlabels", "sales"]]
@@ -1070,6 +862,19 @@ class KessanFig():
             )
         ]
         fig = go.Figure(graph_data)
+        
+        # 年度の区切り線を引く
+        q4_df = pandas_df[pandas_df["quater"]=="4"]
+        vline_x_positions = q4_df.index
+        for q4x in vline_x_positions:
+            xpos = int(q4x) + 0.5
+            
+            fig.add_vline(
+                x=xpos,  # 棒の間に対応する位置
+                line=dict(color='gray', width=1),
+                annotation_text="",  # ラベル（任意）
+                annotation_position="top"
+            )
 
         # グラフレイアウトの設定
         fig.update_layout(
@@ -1087,9 +892,9 @@ class KessanFig():
         
         return fig
         
-        
     def yearly_settlement_trend_barchart(self) -> Figure:
         df = self.df
+        
         df = df.select(["決算期", "sales"])
         sales_df = df.to_pandas()
         
@@ -1130,6 +935,7 @@ class KessanFig():
             marker = dict(color="lightpink")
             
         ))
+        
 
         # グラフレイアウトの設定
         fig.update_layout(
@@ -1144,9 +950,57 @@ class KessanFig():
             ),
             bargap=0.2  # 棒の間隔
         )
+
+        # add_trace_*メソッドでグラフを重ねられるように、"決算期"列を"xlabels"列にコピー。
+        self.df = self.df.with_columns([
+            pl.col("決算期").alias("xlabels")
+        ])
         
         return fig
     
+
+    # 右にy軸をとって各利益(営業利益～純利益)の折れ線グラフを追加する
+    def add_trace_profits(self):
+        df = self.df
+        pandas_df = df.to_pandas()
+        
+        column_idx = 0
+        label_idx = 1
+        color_idx = 2
+        line_trace_cols_attrs = [
+            ['operating_income', '営業利益', 'orange'],
+            ['ordinary_profit', '経常利益', 'lightgreen'],
+            ['final_profit', '純利益', 'purple']
+        ]
+
+        for a in line_trace_cols_attrs:
+            self.fig.add_trace(go.Scatter(
+                x=pandas_df['xlabels'],
+                y=pandas_df[a[column_idx]],
+                mode='lines',
+                name=a[label_idx],
+                yaxis = 'y2',
+                line=dict(color=a[color_idx], width=2)
+            ))
+
+        # レイアウトの設定
+        self.fig.update_layout(
+            title=f'{self.name}({self.code})四半期業績推移({self.end_settlement_date.strftime(DATEFORMAT2)}時点)',
+            xaxis=dict(title='年度'),
+            yaxis=dict(title='売上高 (百万円)'),
+            yaxis2=dict(
+                title="利益(百万円)",
+                overlaying="y", # 左のY軸に重ねる
+                side="right"
+            ),
+            legend=dict(
+                x=1.05,  # 凡例をグラフの外側に配置
+                y=1,    # 上部に配置
+                xanchor='left',  # 凡例の左端をx座標に揃える
+                yanchor='top'    # 凡例の上端をy座標に揃える
+            ),
+            bargap=0.2  # 棒の間隔
+        )
 
 
         
