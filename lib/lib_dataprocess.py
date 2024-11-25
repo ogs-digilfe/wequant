@@ -198,8 +198,23 @@ def get_latest_stockprice(code: int, valudation_date: date=date.today()) -> floa
 
 # mapped functions
 # KessanPl
-def get_yearly_settlement_date(dataframe_raw) -> date:
-    r = dataframe_raw
+def revice_last_date(dataframe_row) -> date:
+    r = dataframe_row
+    d1 = r[-1]
+
+    y = d1.year
+    m = d1.month
+    d = calendar.monthrange(y, m)[1]
+
+    r = list(r)
+    r[-1] = date(y, m, d)
+    r = tuple(r)
+
+    return r
+
+
+def get_yearly_settlement_date(dataframe_row) -> date:
+    r = dataframe_row
 
     settlement_date_idx = r[-2]
     quater_idx = r[-1]
@@ -320,8 +335,11 @@ class KessanPl():
             })
         
         self.df = df
+
+        # スクレイパーによるbugによる誤データの修正。
+        # バグはすでに修正されているが、databaseのレコードも修正であり、暫定的に読み込んだpolaras.DataFrameを修正することとした
+        self.df = self.revice_settlement_date_bug()
         
-    
     def filter_settlement_type(self, settlement_type: Literal["quaterly", "yearly"]) -> None:
         df = self.df
         
@@ -543,7 +561,64 @@ class KessanPl():
 
         return df
 
+    # 決算データスクレイピング時のバグを修正。
+    # バグはすでに修正されているが、databaseのレコードが修正されていないため、暫定的にpolars.DataFrameを読み込んだ後に修正する
+    def revice_settlement_date_bug(self) -> None:
+        df = self.df
 
+        # 日付の差分をとる
+        df = df.with_columns([
+            (pl.col("announcement_date")-pl.col("settlement_date")).alias("delta_days")
+        ])
+
+        # 修正対象レコードを作成
+        # 対象がない場合はそのままself.dfを元に戻して返す
+        reviced_recs_df = df.filter(pl.col("delta_days")>=pl.duration(days=365))
+        if reviced_recs_df.shape[0] == 0:
+            return df.select(df.columns[:-1])
+        reviced_recs_df = reviced_recs_df.with_columns([
+            (pl.col("settlement_date")+pl.duration(days=360)).alias("new_sett_date")
+        ])
+        reviced_recs_df = reviced_recs_df.map_rows(revice_last_date)
+
+        # 列名をただす
+        rename_map = {
+            'column_0': 'code',
+            'column_1': 'settlement_date',
+            'column_2': 'settlement_type',
+            'column_3': 'announcement_date',
+            'column_4': 'sales',
+            'column_5': 'operating_income',
+            'column_6': 'ordinary_profit',
+            'column_7': 'final_profit',
+            'column_8': 'reviced_eps',
+            'column_9': 'dividend',
+            'column_10':'quater',
+            'column_11':'delta_days',
+            'column_12':'new_sett_date'
+        }
+        reviced_recs_df = reviced_recs_df.rename(rename_map)
+        reviced_recs_df = reviced_recs_df.with_columns([
+            pl.col("new_sett_date").alias("settlement_date")
+        ])
+        reviced_recs_df = reviced_recs_df.select(reviced_recs_df.columns[:11])
+        
+        # 元のデータで、delta_daysが365日を超えているものは誤データなので、消す
+        df = df.filter(pl.col("delta_days")< pl.duration(days=360))
+        df = df.select(df.columns[:11])
+
+        # concatしてdrop_duplicatesしてsort
+        df = pl.concat([df, reviced_recs_df])
+        df = df.unique(subset=["code", "settlement_date", "settlement_type"])
+        df = df.sort([
+            pl.col("code"),
+            pl.col("announcement_date")
+        ])
+
+        # 2020年のうるう年のバグを修正
+        df = df.filter(pl.col("settlement_date")!=date(2020, 2, 28))
+        
+        return df
 
     def with_columns_yearly_settlement_date(self) -> None:
         df = self.df
@@ -794,6 +869,11 @@ class KessanFig():
         fp = DATA_DIR / "kessan.parquet"
         self.original_df = read_data(fp)
         df = self.original_df
+
+        # スクレイピング時のバグを修正
+        KPL = KessanPl(df)
+        KPL.revice_settlement_date_bug()
+
         
         df = df.rename({
             "mcode": "code"
