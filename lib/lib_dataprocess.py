@@ -88,6 +88,7 @@ def get_fig_expected_performance_progress_rate_pycharts(code: int, evaluation_da
 
     df = KPL.get_expected_quatery_settlements_progress_rate(evaluation_date)
     df = df.filter(pl.col("code")==code)
+
     df = df.select([
         "code",
         'yearly_settlement_date',
@@ -98,12 +99,24 @@ def get_fig_expected_performance_progress_rate_pycharts(code: int, evaluation_da
         "final_profit_pr(%)"
     ])
 
+    
     pandas_df = df.to_pandas()
+    pldf = df
     df = pandas_df
-    name = MPL.get_name(code)
     rec_idx = df.shape[0] - 1
+
+    # debug
+    print(df)
+
     fyear = df.loc[rec_idx, "yearly_settlement_date"]
     quater = df.loc[rec_idx, "quater"]
+
+    # 予想データがなければコメントを表示
+    pdf = pldf[-1:]
+    pdf = pdf.drop_nulls()
+    name = MPL.get_name(code)
+    if pdf.shape[0] == 0:
+        print(f'{evaluation_date}における{name}({code})の{fyear.year}年{fyear.month}月期の決算予想が公表されていないため、決算進捗率を表示できません。')
 
     # グラフ出力オプション
     pio.renderers.default = 'iframe'
@@ -119,8 +132,13 @@ def get_fig_expected_performance_progress_rate_pycharts(code: int, evaluation_da
         # pychartデータのセット(pandas.DataFrameにセットする)
         labels = ["進捗率(%)", " "]
         pr = df.loc[rec_idx, df.columns[i+3]]
-        
         values = [pr, 100-pr]
+
+        if pr > 100:
+            graph_values = [100, 0]
+        else:
+            graph_values = values
+
         chart_df_data = {
             "labels": labels,
             "values": values
@@ -195,6 +213,54 @@ def get_latest_stockprice(code: int, valudation_date: date=date.today()) -> floa
     
     return close
 
+# 指定したcodeの指定した日における株価と各種ファンダメンタルズデータをまとめて標準出力する
+# pricelist_dfは、raw_pricelistかreviced_pricelistかケースに応じて使い分ける。
+def print_finance_quote(
+        pricelist_df: pl.DataFrame,
+        finance_quote_df: pl.DataFrame,
+        code: int, 
+        valuation_date: date=date.today()
+    ) -> None:
+    
+    # タイトル
+    company_name = get_companyname(code)
+    print(f'{company_name}({code})の銘柄情報\n')
+
+    # 株価
+    df = pricelist_df
+    KPL = PricelistPl(df)
+    tup = KPL.get_latest_dealingdate_and_price(code, valuation_date)
+    stock_price = tup[1]
+    print(f'終値: {stock_price}円({tup[0].strftime(DATEFORMAT2)})')
+
+    # その他指標
+    df = finance_quote_df
+    df = df.filter(pl.col("code")==code)\
+        .filter(pl.col("date")<=valuation_date)
+    df = df.filter(pl.col("date")==pl.col("date").max())
+    quoted_date = df.select(["date"]).row(0)[0]
+    # 予想配当利回り
+    expected_dividened_yield = df.select(["expected_dividend_yield"]).row(0)[0]
+    print(f'予想配当利回り: {expected_dividened_yield}%({quoted_date.strftime(DATEFORMAT2)})')
+    # 予想PER
+    expected_PER = df.select(["expected_PER"]).row(0)[0]
+    print(f'予想PER: {expected_PER}倍({quoted_date.strftime(DATEFORMAT2)})')
+    # 実績PBR
+    actual_PBR = df.select(["actual_PBR"]).row(0)[0]
+    print(f'実績PBR: {actual_PBR}倍({quoted_date.strftime(DATEFORMAT2)})')
+    # 自己資本比率
+    actual_CAR = df.select(["actual_CAR"]).row(0)[0]
+    print(f'自己資本比率: {actual_CAR}%({quoted_date.strftime(DATEFORMAT2)})')
+    # 予想ROE
+    actual_BPS = df.select(["actual_BPS"]).row(0)[0]
+    expected_EPS = df.select(["expected_EPS"]).row(0)[0]
+    expected_ROE = 100*(expected_EPS / actual_BPS)
+    expected_ROE = round(expected_ROE, 2)
+    print(f'予想ROE: {expected_ROE}%({quoted_date.strftime(DATEFORMAT2)})')
+    # 予想ROA
+    expected_ROA = expected_ROE * (actual_CAR/100)
+    expected_ROA = round(expected_ROA, 2)
+    print(f'予想ROA: {expected_ROA}%({quoted_date.strftime(DATEFORMAT2)})')
 
 # mapped functions
 # KessanPl
@@ -245,6 +311,28 @@ def get_yearly_settlement_date(dataframe_row) -> date:
 
 
 # private classes
+# 日々の財務データの加工/分析
+class FinancequotePl():
+    def __init__(self, df: pl.DataFrame):
+        rename_map_dct = {
+            "mcode": "code",
+            "p_key": "date",
+        }
+        df = df.rename(rename_map_dct)
+
+        self.df = df
+    
+    # 指定したcodeの指定した日における各種ファンダメンタルズのレコードをpl.DataFrameで返す
+    def get_finance_quote(self, code: int, valuation_date: date=date.today()) -> pl.DataFrame:
+        df = self.df
+
+        df = df.filter(pl.col("code")==code)\
+            .filter(pl.col("date")<=valuation_date)
+        df = df.filter(pl.col("date")==pl.col("date").max())
+
+        return df
+        
+
 class PricelistPl():
     # fp = filenameの場合、dirはDATA_DIR
     # fp = filepathの場合、fpはfilepathとして処理
@@ -276,17 +364,31 @@ class PricelistPl():
             
             self.df = pl.read_parquet(fp)
 
-        rename_map_dct = {
-            "mcode": "code",
-            "p_key": "date",
-            "p_open": "open",
-            "p_high": "high",
-            "p_low": "low",
-            "p_close": "close"
-        }
-        self.df = self.df.rename(rename_map_dct)
+        # 列のrenameをしてない場合は、rename。
+        if "mcode" in self.df.columns:
+            rename_map_dct = {
+                "mcode": "code",
+                "p_key": "date",
+                "p_open": "open",
+                "p_high": "high",
+                "p_low": "low",
+                "p_close": "close"
+            }
+            self.df = self.df.rename(rename_map_dct)
 
-    
+    # 指定したコードの指定した日付における最新の終値の株価を、(日付, 株価)のタプルで返す
+    def get_latest_dealingdate_and_price(self, code: int, valuation_date: date = date.today()) -> tuple:
+        df = self.df
+
+        df = df.filter(pl.col("code")==code)\
+            .filter(pl.col("date")<=valuation_date)
+        df = df.filter(pl.col("date")==pl.col("date").max())
+
+        dealing_date = df.select(["date"]).row(0)[0]
+        price = df.select(["close"]).row(0)[0]
+
+        return dealing_date, price
+
     # colで指定した列のterm日の移動平均列を、25日移動平均であれば、ma25の
     # ような列名(maの後ろに移動平均の日数)で追加する。
     # termで指定した日数での移動平均が計算できない初期のレコードは、dropされてなくなる
@@ -855,7 +957,6 @@ class MeigaralistPl():
     def get_name(self, code: int) -> str:
         return self.df.filter(pl.col("code")==code).select(["name"]).to_series().item()
 
-
 # 決算推移グラフを描画する
 class KessanFig():
     def __init__(self, 
@@ -996,25 +1097,28 @@ class KessanFig():
                 settlement_type="予"
         )
         fdf = fdf.filter(pl.col("code")==self.code)
-        KPL = KessanPl(fdf)
-        KPL.with_columns_financtial_period()
-        fdf = KPL.df
-        fdf = fdf.with_columns([
-            (pl.col("決算期")+pl.lit("(予)")).alias("決算期")
-        ])
-        
-        # 他のメソッドで利用するために決算予想をconcatする
-        self.df = pl.concat([self.df, fdf])
-        
-        # 元のグラフオブジェクトに決算予想の売上高をadd_traceする
-        pandas_fdf = fdf.to_pandas()
-        fig.add_trace(go.Bar(
-            x = pandas_fdf["決算期"].iloc[-1:],
-            y = pandas_fdf["sales"].iloc[-1:],
-            name = "売上高(予)",
-            marker = dict(color="lightpink")
+
+        # 決算予想が存在しない場合は、次年度予想のconcatをスキップ。
+        if fdf.shape[0] != 0:
+            KPL = KessanPl(fdf)
+            KPL.with_columns_financtial_period()
+            fdf = KPL.df
+            fdf = fdf.with_columns([
+                (pl.col("決算期")+pl.lit("(予)")).alias("決算期")
+            ])
             
-        ))
+            # 他のメソッドで利用するために決算予想をconcatする
+            self.df = pl.concat([self.df, fdf])
+            
+            # 元のグラフオブジェクトに決算予想の売上高をadd_traceする
+            pandas_fdf = fdf.to_pandas()
+            fig.add_trace(go.Bar(
+                x = pandas_fdf["決算期"].iloc[-1:],
+                y = pandas_fdf["sales"].iloc[-1:],
+                name = "売上高(予)",
+                marker = dict(color="lightpink")
+                
+            ))
         
 
         # グラフレイアウトの設定
@@ -1086,8 +1190,12 @@ class KessanFig():
         
 # debug
 if __name__ == '__main__':
-    ysd = get_yearly_settlement_date(date(2024, 9, 30), 4)
-    print(ysd)
+    code = 2914
+    valuation_date = date.today()
+
+    KFIG = KessanFig(code, "通期", end_settlement_date=valuation_date)
+    KFIG.add_trace_profits()
+    KFIG.fig.show()
     
     
     
