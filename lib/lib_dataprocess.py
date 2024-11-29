@@ -75,6 +75,98 @@ def get_df_latest_yearly_performance(code: int, valuation_date: date=date.today(
 
     return df
 
+# codeで指定した銘柄のevaluation_dateで指定した時点での最新の四半期決算発表に基づく
+# 売上高~純利益の決算進捗率を円グラフで表示するためのfigを返す
+# valuation_dateで指定する日において、当年度の本決算が発表されていない日を指定した場合は前期末第4四半期の進捗率を表示するので、進捗率100%で表示される。
+def get_fig_actual_performance_progress_rate_pycharts(code: int, evaluation_date: date, kessan_df: pl.DataFrame, meigaralit_df: pl.DataFrame) -> Figure:
+    df = kessan_df
+    df = df.filter(pl.col("code")==code)
+
+    KPL = KessanPl(df)
+    df = KPL.get_actual_quatery_settlements_progress_rate()
+    df = df.filter(pl.col("announcement_date")<evaluation_date)
+
+    df = df.select([
+        "code",
+        'yearly_settlement_date',
+        "quater",
+        "sales_pr(%)",
+        "operating_income_pr(%)",
+        "ordinary_profit_pr(%)",
+        "final_profit_pr(%)"
+    ])
+
+    pandas_df = df.to_pandas()
+    df = pandas_df
+    rec_idx = df.shape[0] - 1
+
+    fyear = df.loc[rec_idx, "yearly_settlement_date"]
+    quater = df.loc[rec_idx, "quater"]
+
+    # グラフ出力オプション
+    pio.renderers.default = 'iframe'
+
+    # 出力グラフのplot設定(1行4列 -> 横並びに4つ表示)
+    specs = [
+        [{"type": "pie"}, {"type": "pie"}, {"type": "pie"}, {"type": "pie"}]
+    ]
+    fig = make_subplots(rows=1, cols=4, specs=specs)
+
+    # pychartオブジェクトのセット
+    for i in range(4):
+        # pychartデータのセット(pandas.DataFrameにセットする)
+        labels = ["進捗率(%)", " "]
+        pr = df.loc[rec_idx, df.columns[i+3]]
+        values = [pr, 100-pr]
+
+        chart_df_data = {
+            "labels": labels,
+            "values": values
+        }
+        chart_df = pd.DataFrame(chart_df_data)
+
+        # pychartオブジェクトの設定
+        data_set = go.Pie(
+            labels = chart_df["labels"],
+            values = chart_df["values"],
+            hole = 0.5,
+            sort = False,
+            marker = dict(colors=["aqua", "lightgrey"]),
+            textinfo='percent',  # 全体の表示設定
+            texttemplate=['%{percent}', '']
+        )
+        fig.add_trace(data_set, row=1, col=i+1)
+
+    # レイアウトの設定
+    items = ["売上高進捗率(%)", "営業利益進捗率(%)", "経常利益進捗率(%)", "純利益進捗率(%)"]
+    left_gap = 0.07
+    right_gap = 0.93
+    gap_correction = 0.01
+    gap = (right_gap - left_gap) / 3
+    annotations = []
+    for i in range(4):
+        x = left_gap + gap * i
+        if i == 1:
+            x = x + gap_correction
+        elif i == 2:
+            x = x - gap_correction
+        annotations.append(
+            dict(text=items[i], x=x, y=0.5, font_size=12, showarrow=False)
+        )
+
+    # 設定したレイアウトをpychartオブジェクトにセット
+    fig.update_layout(
+        showlegend=False, # 凡例出力をoff
+        annotations=annotations
+    )
+
+    # 出力
+    MPL = MeigaralistPl(meigaralit_df)
+    name = MPL.get_name(code)
+    print(f'{name}({code})の{fyear.year}年{fyear.month}月期第{quater}四半期決算進捗率(評価日：{evaluation_date})')
+
+    return fig
+
 # plotly return graph object functions
 # codeで指定した銘柄のevaluation_dateで指定した時点での最新の年度決算予想に基づく
 # 売上高~純利益の決算進捗率を円グラフで表示するためのfigを返す
@@ -105,9 +197,6 @@ def get_fig_expected_performance_progress_rate_pycharts(code: int, evaluation_da
     df = pandas_df
     rec_idx = df.shape[0] - 1
 
-    # debug
-    print(df)
-
     fyear = df.loc[rec_idx, "yearly_settlement_date"]
     quater = df.loc[rec_idx, "quater"]
 
@@ -133,11 +222,6 @@ def get_fig_expected_performance_progress_rate_pycharts(code: int, evaluation_da
         labels = ["進捗率(%)", " "]
         pr = df.loc[rec_idx, df.columns[i+3]]
         values = [pr, 100-pr]
-
-        if pr > 100:
-            graph_values = [100, 0]
-        else:
-            graph_values = values
 
         chart_df_data = {
             "labels": labels,
@@ -711,7 +795,13 @@ class KessanPl():
 
         # concatしてdrop_duplicatesしてsort
         df = pl.concat([df, reviced_recs_df])
-        df = df.unique(subset=["code", "settlement_date", "settlement_type"])
+
+        # settlement_type=="四"のdrop_duplicate
+        df1 = df.filter(pl.col("settlement_type")=="四")
+        df2 = df.filter(pl.col("settlement_type")!="四")
+        df1 = df1.unique(subset=["code", "settlement_date", "settlement_type"])
+        df = pl.concat([df1, df2])
+
         df = df.sort([
             pl.col("code"),
             pl.col("announcement_date")
@@ -946,10 +1036,11 @@ class KessanPl():
 class MeigaralistPl():
     def __init__(self, df: pl.DataFrame):
         # 列名を変更
-        df = df.rename({
-            "mcode": "code",
-            "mname": "name"
-        })
+        if "mcode" in df.columns:
+            df = df.rename({
+                "mcode": "code",
+                "mname": "name"
+            })
         
         self.df = df
     
