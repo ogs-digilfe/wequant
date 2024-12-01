@@ -415,7 +415,34 @@ class FinancequotePl():
         df = df.filter(pl.col("date")==pl.col("date").max())
 
         return df
+    
+    # PricelistPlとtotal_shares_numを使って時価総額列(百万円)を追加する
+    # pricelist_dfを引数で渡さない場合はdataファイルを読み込む
+    def with_columns_market_cap(self, pricelist_df: Union[pl.DataFrame, None]=None) -> None:
+        if not pricelist_df:
+            pricelist_df = self._read_raw_pricelist()
         
+        df = self.df
+        original_cols = df.columns
+        
+        df = df.join(pricelist_df, on=["code", "date"], how="left")
+        df = df.select(original_cols+["close"])
+        df = df.with_columns([
+            (pl.col("total_shares_num")*pl.col("close")/pl.lit(1000000)).alias("market_cap")
+        ])
+        df = df.select(original_cols+["market_cap"])
+        df = df.with_columns([
+            pl.col("market_cap").cast(pl.Int64).alias("market_cap")
+        ])
+
+        self.df = df
+    
+    # raw_pricelist.parquetを読み込み
+    def _read_raw_pricelist(self) -> pl.DataFrame:
+        fp = DATA_DIR/"raw_pricelist.parquet"
+        df = read_data(fp)
+        
+        return PricelistPl(df).df
 
 class PricelistPl():
     # fp = filenameの場合、dirはDATA_DIR
@@ -1048,6 +1075,52 @@ class MeigaralistPl():
     def get_name(self, code: int) -> str:
         return self.df.filter(pl.col("code")==code).select(["name"]).to_series().item()
 
+# shikiho.parquetを読みこんでデータの抽出、加工、分析などを行う
+class ShikihoPl():
+    def __init__(self, df: pl.DataFrame):
+        # 列名を変更
+        if "mcode" in df.columns:
+            df = df.rename({
+                "mcode": "code",
+                "mname": "name"
+            })
+
+        self.df = df
+    
+    # target_dateで指定した日における最新発行済のデータを抽出する
+    def get_latest_df(self, target_date: date=date.today()) -> pl.DataFrame:
+        df = self.df
+        
+        df = df.filter(pl.col("issue")<target_date)
+        df = df.filter(pl.col("issue")==pl.col("issue").max())
+        
+        return df
+    
+    # codeで指定した銘柄のtarget_dateで指定した日における最新発行済のデータを抽出する
+    def get_latest_stock_df(self, code: int ,target_date: date=date.today()) -> pl.DataFrame:
+        df = self.get_latest_df(target_date)
+        
+        return df.filter(pl.col("code")==code)
+    
+    # codeで指定した銘柄のtarget_dateで指定した日における最新発行済のデータを標準出力する
+    def print_latest_stock_df(self, code: int ,target_date: date=date.today()) -> None:
+        df = self.get_latest_stock_df(code, target_date)
+        
+        cols = df.columns
+        
+        map_dct = {}
+        for col in cols:
+            map_dct[col] = df.row(0)[cols.index(col)]
+        
+        print(f'{map_dct["code"]}({map_dct["name"]})の{map_dct["issue"].strftime(DATEFORMAT2)}発行四季報データ')
+        print(f'{map_dct["title1"]}')
+        print(f'  {map_dct["comment1"]}')
+        print(f'{map_dct["title2"]}')
+        print(f'  {map_dct["comment2"]}')
+        
+        
+        
+
 # 決算推移グラフを描画する
 class KessanFig():
     def __init__(self, 
@@ -1277,17 +1350,118 @@ class KessanFig():
             bargap=0.2  # 棒の間隔
         )
 
+# codeで指定した銘柄のローソク足チャートを描画する
+# pricelist_dfを指定しない場合、dataファイルから読み込む
+# ローソク足チャートの表示期間をstart_dateとend_dateで指定できる
+# fig_typeを指定して表示するチャートの型を日足、週足、月足を選択できる。
+class PricelistFig():
+    def __init__(self,
+        code: int,
+        pricelist_df: Union[pl.DataFrame, None] = None,
+        start_date: date = date(1900, 1, 1),
+        end_date: date = date(2999, 12, 31),
+        fig_type: Literal["daily", "weekly", "monthly"] = "daily"
+    ):
 
+        
+        if not pricelist_df:
+            fp = DATA_DIR / "raw_pricelist.parquet"
+            pricelist_df = read_data(fp)
+        PPL =  PricelistPl(pricelist_df)
+        
+        df = PPL.df
+        df = df.filter(pl.col("code")==code)\
+            .filter(pl.col("date")>=start_date)\
+            .filter(pl.col("date")<=end_date)
+        
+        df = df.with_columns([
+            pl.col("date").cast(pl.Utf8)
+        ])
+        
+        PPL = PricelistPl(df)
+        
+        # weeklyとmonthly。別途作成する
+        if fig_type == "weekly":
+            df = PPL.get_weekly_df()
+        elif fig_type == "monthly":
+            df = PPL.get_monthly_df()
+        
+        self.df = df
+        self.set_fig()
+        
+    def set_fig(self):
+        pddf = self.df.to_pandas()
+        
+        fig = make_subplots(
+            rows = 2, cols = 1,
+            shared_xaxes = True,
+            vertical_spacing=0.02,  # 各行間の間隔
+            # specs=[[{}, {}], [{}, {}]],  # 2行2列目以外のセルにプロットを配置
+            row_heights=[1, 0.3]  # 上段70%, 下段30%
+        )
+
+        # ローソクチャートを追加
+        fig.add_trace(
+            go.Candlestick(
+                x=pddf["date"],
+                open=pddf["open"],
+                high=pddf["high"],
+                low=pddf["low"],
+                close=pddf["close"],
+                name="株価"
+            ),
+            row=1, col=1
+        )
+
+        # 出来高のバーグラフを追加
+        fig.add_trace(
+            go.Bar(
+                x=pddf["date"],
+                y=pddf["volume"],
+                name="出来高",
+                marker=dict(color="blue")
+            ),
+            row=2, col=1
+        )
+        
+        self.fig = fig
+        self._update_layout()
+    
+    def _update_layout(self):
+        fig = self.fig
+
+        # レイアウトの設定
+        fig.update_layout(
+            title="株価ローソクチャートと出来高",
+            xaxis_rangeslider_visible=False,  # レンジスライダーを非表示
+            xaxis=dict(
+                type='category'
+                # type="linear" # x軸を連続データとして扱う
+            ),  # 下段のX軸にタイトルを設定
+            xaxis2=dict(
+                title="日付",
+                type='category'
+                # type="linear" # x軸を連続データとして扱う
+            ),  # 下段のX軸にタイトルを設定
+            yaxis=dict(title="株価"),  # 上段のY軸
+            yaxis2=dict(title="出来高"),  # 下段のY軸
+            # showlegend=False  # 凡例を非表示
+            height= 600  #高さの設定
+        )
+        
+        self.fig = fig
+        
+        
+        
+    
         
 # debug
 if __name__ == '__main__':
-    code = 2914
-    valuation_date = date.today()
-
-    KFIG = KessanFig(code, "通期", end_settlement_date=valuation_date)
-    KFIG.add_trace_profits()
-    KFIG.fig.show()
+    code = 1301
+    end_date = date.today()
+    start_date = end_date + relativedelta(months=-3)
     
+    PFIG = PricelistFig(code, start_date=start_date, end_date=end_date)
     
     
     

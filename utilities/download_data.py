@@ -20,7 +20,8 @@ DOWNLOADABLE_FILES = [
     "meigaralist.parquet",
     "nh225.parquet",
     "raw_pricelist.parquet",
-    "reviced_pricelist.parquet"
+    "reviced_pricelist.parquet",
+    "shikiho.parquet"
 ]
 
 # fileのダウンロード
