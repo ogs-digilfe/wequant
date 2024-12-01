@@ -1358,21 +1358,36 @@ class PricelistFig():
     def __init__(self,
         code: int,
         pricelist_df: Union[pl.DataFrame, None] = None,
+        meigaralist_df: Union[pl.DataFrame, None] = None,
         start_date: date = date(1900, 1, 1),
         end_date: date = date(2999, 12, 31),
         fig_type: Literal["daily", "weekly", "monthly"] = "daily"
     ):
-
+        # PricelistFigのプロパティ
+        self.code = code
+        self.start_date = start_date
+        self.end_date = end_date
+        self.ticknum = 10
+        self.tickangle = 45
         
         if not pricelist_df:
             fp = DATA_DIR / "raw_pricelist.parquet"
             pricelist_df = read_data(fp)
         PPL =  PricelistPl(pricelist_df)
+        if not meigaralist_df:
+            fp = DATA_DIR / "meigaralist.parquet"
+            meigaralist_df = read_data(fp)
+        PPL = PricelistPl(pricelist_df)
+        MPL = MeigaralistPl(meigaralist_df)
+        
+        self.name = MPL.get_name(code)
         
         df = PPL.df
         df = df.filter(pl.col("code")==code)\
             .filter(pl.col("date")>=start_date)\
             .filter(pl.col("date")<=end_date)
+            
+        self.datanum = df.shape[0]
         
         df = df.with_columns([
             pl.col("date").cast(pl.Utf8)
@@ -1412,6 +1427,14 @@ class PricelistFig():
             ),
             row=1, col=1
         )
+        
+        # x1軸の日付ラベルをセット
+        row_num = self.df.shape[0]
+        if row_num <= self.ticknum:
+            self.tickvals = pddf["date"]
+        else:
+            step = int(row_num/self.ticknum)
+            self.tickvals = pddf["date"][::step]
 
         # 出来高のバーグラフを追加
         fig.add_trace(
@@ -1427,20 +1450,36 @@ class PricelistFig():
         self.fig = fig
         self._update_layout()
     
+    # 指定した日に縦線を引く
+    # ただし、start_date > target_date or end_date < target_dateの場合は無視される
+    def add_vline(self, target_date: date) -> None:
+        if self.start_date > target_date or self.end_date < target_date:
+            return
+
+        self.fig.add_vline(
+            x=target_date.strftime(DATEFORMAT),
+            line=dict(color='grey', width=1),  # 色やスタイルのカスタマイズ
+            opacity=0.5
+        )
+        
+        
+    
     def _update_layout(self):
         fig = self.fig
 
         # レイアウトの設定
         fig.update_layout(
-            title="株価ローソクチャートと出来高",
+            title=f'{self.name}({self.code})株価ローソクチャートと出来高{self.start_date.strftime(DATEFORMAT2)}～{self.end_date.strftime(DATEFORMAT2)}',
             xaxis_rangeslider_visible=False,  # レンジスライダーを非表示
             xaxis=dict(
                 type='category'
                 # type="linear" # x軸を連続データとして扱う
             ),  # 下段のX軸にタイトルを設定
             xaxis2=dict(
-                title="日付",
-                type='category'
+                title="取引日",
+                type='category',
+                tickvals=self.tickvals,
+                tickangle = self.tickangle
                 # type="linear" # x軸を連続データとして扱う
             ),  # 下段のX軸にタイトルを設定
             yaxis=dict(title="株価"),  # 上段のY軸
