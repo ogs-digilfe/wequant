@@ -968,6 +968,46 @@ class KessanPl():
 
         self.df = df
 
+    # 前年同期と比較して、差分利益率：(今年度利益率-昨年度利益率)/(今年度売上高-昨年度売上高)
+    # を営業利益～純利益の各差分利益について計算して列を追加する。
+    # 売上高に対しては、売上高伸び率列を追加する。
+    # 利益改善度合いを見るために利用する。
+    # 決算予想の場合は、昨年度の実績に対して出す。
+    # 次期移行の予想はnull。
+    def with_columns_diff_growthrate(self) -> None:
+        df = self.df
+
+        # 四半期
+        qdf = df.filter(pl.col("settlement_type")=="四")
+        # 昨年度の列を同じレコードに連結
+        for c in qdf.columns:
+            qdf = qdf.with_columns([
+                pl.col(c).shift(4).alias(f'ly_{c}')
+            ])
+        qdf = qdf.with_columns([
+            (pl.col("settlement_date")-pl.col("ly_settlement_date")).alias("diff_sett")
+        ])
+
+        # 前年同期が比較できるものだけ、filterする
+        qdf = qdf.filter(pl.col("quater")==pl.col("ly_quater"))\
+            .filter(pl.col("diff_sett")>=pl.duration(days=365))\
+            .filter(pl.col("diff_sett")<=pl.duration(days=366))
+
+        # 追加列を計算する
+        # 売上高伸び率
+        qdf = qdf.with_columns([
+            ((pl.lit(100)*(pl.col("sales")-pl.col("ly_sales"))/pl.col("ly_sales")).round(1)).alias("sales_growthrate")
+        ])
+        # 差分利益率
+        target_cols = ["operating_income", "ordinary_profit", "final_profit"]
+        for c in target_cols:
+            qdf = qdf.with_columns([
+                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/(pl.col("sales")-pl.col("ly_sales"))).round(1)).alias(f"diff_{c}_growthrate")
+            ])
+
+
+        self.df = qdf
+
     def with_columns_expected_quatery_settlements_progress_rate(self, valuation_date: date=date.today()) -> None:
         # 四半期単体決算のsales～filal_profitの同一決算期における累積列を追加
         self.with_columns_accumulated_quaterly_settlement()
