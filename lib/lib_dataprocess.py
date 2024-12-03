@@ -590,9 +590,6 @@ class KessanPl():
         
         return rdf
 
-
-        
-
     def get_latest_yearly_settlements(self, 
             reference_date: date=date.today(),
             settlement_type: Literal["本", "予"]="本"
@@ -976,6 +973,7 @@ class KessanPl():
     # 次期移行の予想はnull。
     def with_columns_diff_growthrate(self) -> None:
         df = self.df
+        ori_cols = df.columns
 
         # 四半期
         qdf = df.filter(pl.col("settlement_type")=="四")
@@ -998,15 +996,94 @@ class KessanPl():
         qdf = qdf.with_columns([
             ((pl.lit(100)*(pl.col("sales")-pl.col("ly_sales"))/pl.col("ly_sales")).round(1)).alias("sales_growthrate")
         ])
-        # 差分利益率
+        # 差分利益成率
         target_cols = ["operating_income", "ordinary_profit", "final_profit"]
         for c in target_cols:
             qdf = qdf.with_columns([
                 ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/(pl.col("sales")-pl.col("ly_sales"))).round(1)).alias(f"diff_{c}_growthrate")
             ])
 
+        # select
+        qdf = qdf.select(ori_cols+qdf.columns[-4:])
 
-        self.df = qdf
+        # 本決算
+        ydf = df.filter(pl.col("settlement_type")=="本")
+        # 昨年度の列を同じレコードに連結
+        for c in ydf.columns:
+            ydf = ydf.with_columns([
+                pl.col(c).shift(1).alias(f'ly_{c}')
+            ])
+        ydf = ydf.with_columns([
+            (pl.col("settlement_date")-pl.col("ly_settlement_date")).alias("diff_sett")
+        ])
+        # 前年同期が比較できるものだけ、filterする
+        ydf = ydf.filter(pl.col("quater")==pl.col("ly_quater"))\
+            .filter(pl.col("diff_sett")>=pl.duration(days=365))\
+            .filter(pl.col("diff_sett")<=pl.duration(days=366))
+        # 追加列を計算する
+        # 売上高伸び率
+        ydf = ydf.with_columns([
+            ((pl.lit(100)*(pl.col("sales")-pl.col("ly_sales"))/pl.col("ly_sales")).round(1)).alias("sales_growthrate")
+        ])
+        # 差分利益率
+        target_cols = ["operating_income", "ordinary_profit", "final_profit"]
+        for c in target_cols:
+            ydf = ydf.with_columns([
+                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/(pl.col("sales")-pl.col("ly_sales"))).round(1)).alias(f"diff_{c}_growthrate")
+            ])
+
+        # select
+        ydf = ydf.select(ori_cols+qdf.columns[-4:])
+
+        # 決算予想
+        fdf = df.filter(pl.col("settlement_type")=="予")
+        fdf = fdf.with_columns([
+            pl.col("settlement_date").alias("key")
+        ])
+
+        pydf = df.filter(pl.col("settlement_type")=="本")
+        pydf_cols = pydf.columns
+        pydf = pydf.with_columns([
+            (pl.col("settlement_date") + pl.duration(days=364)).alias("key")
+        ])
+        pydf = pydf.map_rows(revice_last_date)
+        pydf.columns = pydf_cols + ["key"]
+        rename_cols = pydf.columns[1:-1]
+        rename_map = {}
+        for c in rename_cols:
+            rename_map[c] = f'ly_{c}'
+        pydf = pydf.rename(rename_map)
+        # 連結
+        key_cols = ["code", "key"]
+        fdf = fdf.join(pydf, on=key_cols, how="left")
+        # 売上高伸び率
+        fdf = fdf.with_columns([
+            ((pl.lit(100)*(pl.col("sales")-pl.col("ly_sales"))/pl.col("ly_sales")).round(1)).alias("sales_growthrate")
+        ])
+        # 差分利益率
+        target_cols = ["operating_income", "ordinary_profit", "final_profit"]
+        for c in target_cols:
+            fdf = fdf.with_columns([
+                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/(pl.col("sales")-pl.col("ly_sales"))).round(1)).alias(f"diff_{c}_growthrate")
+            ])
+        # select
+        fdf = fdf.select(ori_cols+qdf.columns[-4:])
+
+        # それぞれのdfをconcat
+        df = pl.concat([qdf, ydf, fdf])
+
+        # なくなったレコードを元に戻す
+        df2 = self.df
+        df2 = df2.join(df, on=["code", "settlement_date", "announcement_date", "settlement_type"], how="anti")
+        added_cols = df.columns[-4:]
+        for c in added_cols:
+            df2 = df2.with_columns([
+                pl.lit(None, dtype=pl.Float64).alias(c)
+            ])
+        df = pl.concat([df, df2])
+
+        self.df = df
+        self._sort_df()
 
     def with_columns_expected_quatery_settlements_progress_rate(self, valuation_date: date=date.today()) -> None:
         # 四半期単体決算のsales～filal_profitの同一決算期における累積列を追加
@@ -1081,6 +1158,104 @@ class KessanPl():
 
         self.df = df
 
+    # 売上高～純利益までの前年同期からの成長率列を追加する
+    def with_columns_growthrate_lastyear(self):
+        df = self.df
+        ori_cols = df.columns
+
+        # 四半期
+        qdf = df.filter(pl.col("settlement_type")=="四")
+        # 昨年度の列を同じレコードに連結
+        for c in qdf.columns:
+            qdf = qdf.with_columns([
+                pl.col(c).shift(4).alias(f'ly_{c}')
+            ])
+        qdf = qdf.with_columns([
+            (pl.col("settlement_date")-pl.col("ly_settlement_date")).alias("diff_sett")
+        ])
+        # 前年同期が比較できるものだけ、filterする
+        qdf = qdf.filter(pl.col("quater")==pl.col("ly_quater"))\
+            .filter(pl.col("diff_sett")>=pl.duration(days=365))\
+            .filter(pl.col("diff_sett")<=pl.duration(days=366))
+        # 追加列を計算する
+        target_cols = ["sales", "operating_income", "ordinary_profit", "final_profit"]
+        # 成長率
+        for c in target_cols:
+            qdf = qdf.with_columns([
+                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/pl.col(f"ly_{c}")).round(1)).alias(f"{c}_growthrate")
+            ])
+        # select
+        qdf = qdf.select(ori_cols+qdf.columns[-4:])
+
+        # 本決算
+        ydf = df.filter(pl.col("settlement_type")=="本")
+        # 昨年度の列を同じレコードに連結
+        for c in ydf.columns:
+            ydf = ydf.with_columns([
+                pl.col(c).shift(1).alias(f'ly_{c}')
+            ])
+        ydf = ydf.with_columns([
+            (pl.col("settlement_date")-pl.col("ly_settlement_date")).alias("diff_sett")
+        ])
+        # 追加列を計算する
+        # 伸び率
+        target_cols = ["sales", "operating_income", "ordinary_profit", "final_profit"]
+        for c in target_cols:
+            ydf = ydf.with_columns([
+                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/pl.col(f"ly_{c}")).round(1)).alias(f"{c}_growthrate")
+            ])
+        # select
+        ydf = ydf.select(ori_cols+qdf.columns[-4:])
+
+
+        # 決算予想
+        fdf = df.filter(pl.col("settlement_type")=="予")
+        fdf = fdf.with_columns([
+            pl.col("settlement_date").alias("key")
+        ])
+        pydf = df.filter(pl.col("settlement_type")=="本")
+        pydf_cols = pydf.columns
+        pydf = pydf.with_columns([
+            (pl.col("settlement_date") + pl.duration(days=364)).alias("key")
+        ])
+        pydf = pydf.map_rows(revice_last_date)
+        pydf.columns = pydf_cols + ["key"]
+        rename_cols = pydf.columns[1:-1]
+        rename_map = {}
+        for c in rename_cols:
+            rename_map[c] = f'ly_{c}'
+        pydf = pydf.rename(rename_map)
+        # 連結
+        key_cols = ["code", "key"]
+        fdf = fdf.join(pydf, on=key_cols, how="left")
+        # 追加列を計算する
+        # 伸び率
+        target_cols = ["sales", "operating_income", "ordinary_profit", "final_profit"]
+        for c in target_cols:
+            fdf = fdf.with_columns([
+                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/pl.col(f"ly_{c}")).round(1)).alias(f"{c}_growthrate")
+            ])
+        # select
+        fdf = fdf.select(ori_cols+qdf.columns[-4:])
+
+        # それぞれのdfをconcat
+        df = pl.concat([qdf, ydf, fdf])
+
+        # なくなったレコードを元に戻す
+        df2 = self.df
+        df2 = df2.join(df, on=["code", "settlement_date", "announcement_date", "settlement_type"], how="anti")
+        added_cols = df.columns[-4:]
+        for c in added_cols:
+            df2 = df2.with_columns([
+                pl.lit(None, dtype=pl.Float64).alias(c)
+            ])
+        df = pl.concat([df, df2])
+        
+        self.df = df
+        self._sort_df()
+
+
+
 
     # 作りかけ
     def with_columns_settlements_progress_rate(self) -> None:
@@ -1097,6 +1272,17 @@ class KessanPl():
 
         # レコードの決算発表時に発表済のレコードのみ抽出
         df = df.filter(pl.col("announcement_date")>pl.col("announcement_date_right"))
+
+        self.df = df
+
+    def _sort_df(self):
+        df = self.df
+
+        df = df.sort([
+            pl.col("code"),
+            pl.col("announcement_date"),
+            pl.col("settlement_type")
+        ])
 
         self.df = df
 
