@@ -499,6 +499,23 @@ class PricelistPl():
         price = df.select(["close"]).row(0)[0]
 
         return dealing_date, price
+    
+    # items_dfにpl.DataFrame.columns = ["code", "start_date", "end_date"]のpl.DataFrameを与えると、
+    # 各レコードのstart_dateからend_dateまでの株価騰落率の列を追加して返す
+    # *_pointは、起点(start)と終点(end)において、日足ローソクのどの時点の株価を起点、または終点とするか選択する。
+    def get_stockprice_change_rate(self, 
+        items_df: pl.DataFrame,
+        start_point: Literal["open", "high", "low", "close"] = "open",
+        end_point: Literal["open", "high", "low", "close"] = "open"
+    ) -> pl.DataFrame:
+        
+        idf1 = items_df.with_columns([
+            pl.col("start_date").alias("date")
+        ]).select(["code", "date"])
+        df1 = idf1.join(self.df, on=idf1.columns, how="left")
+        
+        return df1
+        
 
     # colで指定した列のterm日の移動平均列を、25日移動平均であれば、ma25の
     # ような列名(maの後ろに移動平均の日数)で追加する。
@@ -769,6 +786,60 @@ class KessanPl():
         # 冒頭のwith_columns_accumulated_quaterly_settlementで計算のために追加した列を削除する
         self.df = self.df.select(self.df.columns[:-5])
 
+        return df
+    
+    # KessanPlの四半期決算、および本決算の決算発表日から翌決算発表日までの株価の騰落率列と同期間の日経平均の騰落率列を追加したpl.DataFrameを返す
+    # overnight_biginingをTrueにセットすると、起点の株価として決算発表日当日の株価をセットし、Falseにセットすると、決算発表日翌営業日の株価をセットする。
+    # overnight_endをTrueにセットすると、終点の株価として決算発表日翌営業日の株価をセットし、Falseにセットすると、決算発表日当日の株価をセットする。
+    # *_pointは、期首(bigining)と期末(end)において、日足ローソクのどの時点の株価を起点、または終点とするか選択する。
+    def get_settlement_performance(self,
+        overnight_bigining: bool = False,
+        overnight_end: bool = True,
+        bigining_point: Literal["open", "high", "low", "close"] = "open",
+        end_point: Literal["open", "high", "low", "close"] = "open"
+    ) -> pl.DataFrame:
+        df = self.df
+        
+        # 本決算
+        yitems_df = self.get_settlement_performance_items_df("本")            
+        
+        return yitems_df
+    
+    # 決算期間中における株価騰落を求めるための引数一覧をpl.DataFrameで取得する
+    # 取得されるdfの列は、"code", "start_date", "end_date"
+    def get_settlement_performance_items_df(self,
+        settlement_type: Literal["本", "四"],
+        overnight_bigining: bool = False,
+        overnight_end: bool = True,
+    ) -> pl.DataFrame:
+        
+        df = self.df
+
+        df = df.filter(pl.col("settlement_type")==settlement_type)
+        df = df.with_columns([
+            pl.col("code").shift(-1).alias("ncode"),
+            pl.col("announcement_date").shift(-1).alias("end_date")
+        ])
+        
+        if not overnight_bigining:
+            df = df.with_columns([
+                (pl.col("announcement_date") + pl.duration(days=1)).alias("start_date")
+            ])
+        
+        if overnight_end:
+            df = df.with_columns([
+                (pl.col("end_date") + pl.duration(days=1)).alias("end_date")
+            ])
+        
+        # 騰落率を取得するための引数表を作成
+        df = df.select([
+            "code",
+            "start_date",
+            "end_date"
+        ])
+        
+        df = df.drop_nulls()
+        
         return df
 
     # 決算データスクレイピング時のバグを修正。
@@ -1343,6 +1414,44 @@ class ShikihoPl():
         print(f'  {map_dct["comment1"]}')
         print(f'{map_dct["title2"]}')
         print(f'  {map_dct["comment2"]}')
+    
+    # codeで指定した銘柄の過去も含めた四季報のtitle1/comment1, title2/comment2を標準出力する
+    # valuation_dateで指定した日以前のものを出力する。
+    # numで指定した数だけ出力。
+    # num=0を指定すると、すべてのデータを出力する。
+    def print_stock_df(self, code: int, valuation_date: date=date.today(), num: int=0) -> None:
+        df = self.df
+        df = df.filter(pl.col("code")==code)\
+            .filter(pl.col("issue")<=valuation_date)\
+            .sort(by=["issue"], descending=[True])
+        if num !=0:
+            df = df.with_row_count(name="index")
+            df = df.filter(pl.col("index")<num)
+            df = df.select(df.columns[1:])
+
+        name = df["name"][0]
+        print(f'{code}({name})の四季報データ履歴')
+        
+        for i in range(df.shape[0]):
+            print()
+            self._print_row(df.row(i))
+            
+            
+        
+    # ShikihoPl.dfの行を標準出力する
+    def _print_row(self, row):
+        cols = self.df.columns
+
+        map_dct = {}
+        for col in cols:
+            map_dct[col] = row[cols.index(col)]
+        
+        print(f'発行日: {map_dct["issue"].strftime(DATEFORMAT2)}')
+        print(f'{map_dct["title1"]}')
+        print(f'  {map_dct["comment1"]}')
+        print(f'{map_dct["title2"]}')
+        print(f'  {map_dct["comment2"]}')
+        
         
         
         
@@ -1596,11 +1705,11 @@ class PricelistFig():
         self.ticknum = 10
         self.tickangle = 45
         
-        if not pricelist_df:
+        if type(pricelist_df) != pl.DataFrame:
             fp = DATA_DIR / "raw_pricelist.parquet"
             pricelist_df = read_data(fp)
         PPL =  PricelistPl(pricelist_df)
-        if not meigaralist_df:
+        if type(meigaralist_df) != pl.DataFrame:
             fp = DATA_DIR / "meigaralist.parquet"
             meigaralist_df = read_data(fp)
         PPL = PricelistPl(pricelist_df)
@@ -1694,8 +1803,10 @@ class PricelistFig():
         fig = self.fig
 
         # レイアウトの設定
+        chart_start = self.df["date"].min()
+        chart_end = self.df["date"].max()
         fig.update_layout(
-            title=f'{self.name}({self.code})株価ローソクチャートと出来高{self.start_date.strftime(DATEFORMAT2)}～{self.end_date.strftime(DATEFORMAT2)}',
+            title=f'{self.name}({self.code})株価ローソクチャートと出来高{chart_start} ～ {chart_end}',
             xaxis_rangeslider_visible=False,  # レンジスライダーを非表示
             xaxis=dict(
                 type='category'
