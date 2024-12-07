@@ -789,10 +789,12 @@ class KessanPl():
         return df
     
     # KessanPlの四半期決算、および本決算の決算発表日から翌決算発表日までの株価の騰落率列と同期間の日経平均の騰落率列を追加したpl.DataFrameを返す
+    # pricelist_dfが空のdataframe(初期値)の場合、parquetファイルから読み込んでくる。
     # overnight_biginingをTrueにセットすると、起点の株価として決算発表日当日の株価をセットし、Falseにセットすると、決算発表日翌営業日の株価をセットする。
     # overnight_endをTrueにセットすると、終点の株価として決算発表日翌営業日の株価をセットし、Falseにセットすると、決算発表日当日の株価をセットする。
     # *_pointは、期首(bigining)と期末(end)において、日足ローソクのどの時点の株価を起点、または終点とするか選択する。
     def get_settlement_performance(self,
+        pricelist_df: pl.DataFrame = pl.DataFrame(),
         overnight_bigining: bool = False,
         overnight_end: bool = True,
         bigining_point: Literal["open", "high", "low", "close"] = "open",
@@ -800,8 +802,16 @@ class KessanPl():
     ) -> pl.DataFrame:
         df = self.df
         
+        # precelist_df
+        if pricelist_df.shape[0] == 0:
+            fp = DATA_DIR/"reviced_pricelist.parquet"
+            df = read_data(fp)
+            RPL = PricelistPl(df)
+            pricelist_df = RPL.df
+            
+        
         # 本決算
-        yitems_df = self.get_settlement_performance_items_df("本")            
+        yitems_df = self.get_settlement_performance_items_df("本", pricelist_df)            
         
         return yitems_df
     
@@ -809,6 +819,7 @@ class KessanPl():
     # 取得されるdfの列は、"code", "start_date", "end_date"
     def get_settlement_performance_items_df(self,
         settlement_type: Literal["本", "四"],
+        pricelist_df: pl.DataFrame,
         overnight_bigining: bool = False,
         overnight_end: bool = True,
     ) -> pl.DataFrame:
@@ -840,7 +851,20 @@ class KessanPl():
         
         df = df.drop_nulls()
         
-        return df
+        # start_date
+        df1 = df.select(["code", "start_date"])
+        df2 = pricelist_df.select(["code", "date"])
+        df3 = df1.join(df2, on="code", how="inner")
+        df3 = df3.filter(pl.col("start_date")<=pl.col("date"))
+        df3 = df3.group_by(["code", "start_date"]).agg([
+            pl.col("date").min()
+        ])
+        df3 = df3.with_columns([pl.col("date").alias("start_date")])
+        
+        #ここから
+        
+        
+        return df3
 
     # 決算データスクレイピング時のバグを修正。
     # バグはすでに修正されているが、databaseのレコードが修正されていないため、暫定的にpolars.DataFrameを読み込んだ後に修正する
