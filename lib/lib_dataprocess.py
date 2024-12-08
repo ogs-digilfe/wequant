@@ -825,26 +825,26 @@ class KessanPl():
     ) -> pl.DataFrame:
         
         df = self.df
+        
+        # announcement_dateがきちんととれていないものを除外
+        df = df.filter(pl.col("announcement_date")!=date(1900,1,1))
 
         df = df.filter(pl.col("settlement_type")==settlement_type)
         df = df.with_columns([
             pl.col("code").shift(-1).alias("ncode"),
+            pl.col("settlement_date").shift(-1).alias("nsettlement_date"),
             pl.col("announcement_date").shift(-1).alias("end_date")
         ])
         
-        if not overnight_bigining:
-            df = df.with_columns([
-                (pl.col("announcement_date") + pl.duration(days=1)).alias("start_date")
-            ])
-        
-        if overnight_end:
-            df = df.with_columns([
-                (pl.col("end_date") + pl.duration(days=1)).alias("end_date")
-            ])
+        df = df.with_columns([
+            pl.col("announcement_date").alias("start_date"),
+            pl.col("nsettlement_date").alias("settlement_date")
+        ])
         
         # 騰落率を取得するための引数表を作成
         df = df.select([
             "code",
+            "settlement_date",
             "start_date",
             "end_date"
         ])
@@ -852,19 +852,48 @@ class KessanPl():
         df = df.drop_nulls()
         
         # start_date
-        df1 = df.select(["code", "start_date"])
+        df1 = df.select(["code", "settlement_date", "start_date"])
         df2 = pricelist_df.select(["code", "date"])
         df3 = df1.join(df2, on="code", how="inner")
-        df3 = df3.filter(pl.col("start_date")<=pl.col("date"))
-        df3 = df3.group_by(["code", "start_date"]).agg([
-            pl.col("date").min()
-        ])
-        df3 = df3.with_columns([pl.col("date").alias("start_date")])
+        if overnight_bigining:
+            df3 = df3.filter(pl.col("start_date")>=pl.col("date"))
+            df3 = df3.group_by(["code", "settlement_date", "start_date"]).agg([
+                pl.col("date").max()
+            ])
+        else:
+            df3 = df3.filter(pl.col("start_date")<pl.col("date"))
+            df3 = df3.group_by(["code", "settlement_date", "start_date"]).agg([
+                pl.col("date").min()
+            ])
+        # df3 = df3.with_columns([pl.col("date").alias("start_date")])
         
-        #ここから
+        #end_date
+        df1 = df.select(["code", "settlement_date", "end_date"])
+        df2 = pricelist_df.select(["code", "date"])
+        df4 = df1.join(df2, on="code", how="inner")
+        if overnight_end:
+            df4 = df4.filter(pl.col("end_date")<pl.col("date"))
+            df4 = df4.group_by(["code", "settlement_date", "end_date"]).agg([
+                pl.col("date").min()
+            ])
+        else:
+            df4 = df4.filter(pl.col("end_date")>=pl.col("date"))
+            df4 = df4.group_by(["code", "settlement_date", "end_date"]).agg([
+                pl.col("date").min()
+            ])
+        
+        # 連結してsort
+        df3 = df3.with_columns([pl.col("date").alias("start_date")]).select(["code", "settlement_date", "start_date"])
+        # 異常値レコードの取り除き
+        df3 = df3.filter(pl.col("settlement_date")>pl.col("start_date"))
+        
+        df4 = df4.with_columns([pl.col("date").alias("end_date")]).select(["code", "settlement_date", "end_date"])
+        
+        df = df3.join(df4, on=["code", "settlement_date"], how="left")
+        df = df.sort(by=["code", "settlement_date"])
         
         
-        return df3
+        return df
 
     # 決算データスクレイピング時のバグを修正。
     # バグはすでに修正されているが、databaseのレコードが修正されていないため、暫定的にpolars.DataFrameを読み込んだ後に修正する
