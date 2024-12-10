@@ -335,16 +335,25 @@ def print_finance_quote(
     # 自己資本比率
     actual_CAR = df.select(["actual_CAR"]).row(0)[0]
     print(f'自己資本比率: {actual_CAR}%({quoted_date.strftime(DATEFORMAT2)})')
-    # 予想ROE
+    # 予想ROE/予想ROA
     actual_BPS = df.select(["actual_BPS"]).row(0)[0]
     expected_EPS = df.select(["expected_EPS"]).row(0)[0]
-    expected_ROE = 100*(expected_EPS / actual_BPS)
-    expected_ROE = round(expected_ROE, 2)
-    print(f'予想ROE: {expected_ROE}%({quoted_date.strftime(DATEFORMAT2)})')
-    # 予想ROA
-    expected_ROA = expected_ROE * (actual_CAR/100)
-    expected_ROA = round(expected_ROA, 2)
-    print(f'予想ROA: {expected_ROA}%({quoted_date.strftime(DATEFORMAT2)})')
+
+    if not expected_EPS is None:
+        expected_ROE = 100*(expected_EPS / actual_BPS)
+        expected_ROE = round(expected_ROE, 2)
+        print(f'予想ROE: {expected_ROE}%({quoted_date.strftime(DATEFORMAT2)})')
+        expected_ROA = expected_ROE * (actual_CAR/100)
+        expected_ROA = round(expected_ROA, 2)
+        print(f'予想ROA: {expected_ROA}%({quoted_date.strftime(DATEFORMAT2)})')
+    else:
+        print(f'予想ROE: 決算予想がないため、表示不可')
+        print(f'予想ROA: 決算予想がないため、表示不可')
+
+    #　時価総額
+    market_capitalization = df.select(["market_cap"]).row(0)[0]
+    market_capitalization = round(market_capitalization/100, 1)
+    print(f'時価総額: {market_capitalization}億円({quoted_date.strftime(DATEFORMAT2)})')
 
 # mapped functions
 # KessanPl
@@ -787,13 +796,62 @@ class KessanPl():
         self.df = self.df.select(self.df.columns[:-5])
 
         return df
+
+    # codeで指定した銘柄のvaluation_date時点で発表済の四半期決算を、新しいものからnum個返す
+    def get_latest_quater_settlement(self, code: int, valuation_date: date=date.today(), num: int=8) -> None:
+        df = self.df
+
+        df = df.filter(pl.col("code")==code)\
+            .filter(pl.col("settlement_type")=="四")\
+            .filter(pl.col("announcement_date")<=valuation_date)
+        
+        df = df.sort(by=["announcement_date"], descending=[True])
+        df = df[:num]
+        
+        return df
     
-    # KessanPlの四半期決算、および本決算の決算発表日から翌決算発表日までの株価の騰落率列と同期間の日経平均の騰落率列を追加したpl.DataFrameを返す
+    # codeで指定された銘柄のvaluation_date時点における発表済決算予想の発表推移をpl.DataFrameで返す
+    # this_settlement_periodをTrueにセットすると、valuation_dateを含む期の決算予想のみに絞る
+    # descending=Trueにすると、発表日が新しいもの順に並べ替える
+    def get_settlement_forcast(self, code: int, valuation_date: date=date.today(), this_settlement_period=True, descending=True) -> pl.DataFrame:
+        df = self.df
+
+        # announcement_dateの日付レンジの取得
+        df = df.filter(pl.col("code")==code)\
+            .filter(pl.col("announcement_date")<=valuation_date)\
+            .filter(pl.col("settlement_type")=="予")
+        
+        if descending:
+            df = df.sort(by=["announcement_date"], descending=[descending])
+    
+        if not this_settlement_period:
+            return df
+    
+        # 今季の履歴のみ出力する場合
+        df1= self.df
+        df1 = df1.filter(pl.col("settlement_type")=="本")
+        pdf = df1[-1:]
+        last_settlement_date = pdf["settlement_date"].to_list()[0]
+
+        df = df.filter(pl.col("settlement_type")=="予")\
+            .filter(pl.col("settlement_date")>last_settlement_date)\
+            .filter(pl.col("settlement_date")<(pl.col("settlement_date")+pl.duration(days=370)))
+
+        print(last_settlement_date)
+            
+
+        return df
+
+    
+    # KessanPlの四半期決算、または通期決算の決算発表日から翌決算発表日までの株価の騰落率列と同期間の日経平均の騰落率列を追加したpl.DataFrameを返す
+    # 計算量とメモリ消費量が多いので、KessanPl.dfとpricelist_dfは期間などである程度絞ってやった方が良い。
+    # settlement_typeで、通期決算で騰落率を取得するか、四半期決算で騰落率を取得するか選ぶ。
     # pricelist_dfが空のdataframe(初期値)の場合、parquetファイルから読み込んでくる。
     # overnight_biginingをTrueにセットすると、起点の株価として決算発表日当日の株価をセットし、Falseにセットすると、決算発表日翌営業日の株価をセットする。
     # overnight_endをTrueにセットすると、終点の株価として決算発表日翌営業日の株価をセットし、Falseにセットすると、決算発表日当日の株価をセットする。
     # *_pointは、期首(bigining)と期末(end)において、日足ローソクのどの時点の株価を起点、または終点とするか選択する。
     def get_settlement_performance(self,
+        settlement_type: Literal["本", "四"],
         pricelist_df: pl.DataFrame = pl.DataFrame(),
         overnight_bigining: bool = False,
         overnight_end: bool = True,
@@ -801,6 +859,7 @@ class KessanPl():
         end_point: Literal["open", "high", "low", "close"] = "open"
     ) -> pl.DataFrame:
         df = self.df
+        df = df.filter(pl.col("settlement_type")==settlement_type)
         
         # precelist_df
         if pricelist_df.shape[0] == 0:
@@ -810,10 +869,50 @@ class KessanPl():
             pricelist_df = RPL.df
             
         
-        # 本決算
-        yitems_df = self.get_settlement_performance_items_df("本", pricelist_df)            
+        #　各レコードの決算発表日を元に、騰落率測定開始日と測定終了日のdfを取得
+        yitems_df = self.get_settlement_performance_items_df(
+            settlement_type, 
+            pricelist_df,
+            overnight_bigining,
+            overnight_end
+        )            
         
-        return yitems_df
+        # yitems_dfにpricelist_dfの該当レコードの株価を連結する
+        # start_date
+        pricelist_df = pricelist_df.with_columns([
+            pl.col("date").alias("start_date")
+        ])
+        yitems_df1 = yitems_df.join(pricelist_df, on=["code", "start_date"], how="left")
+        yitems_df1 = yitems_df1.select(yitems_df.columns+[bigining_point])
+        yitems_df1 = yitems_df1.rename({
+            bigining_point: "start_price"
+        })
+        
+        # end_date
+        pricelist_df = pricelist_df.with_columns([
+            pl.col("start_date").alias("end_date")
+        ])
+        yitems_df2 = yitems_df.join(pricelist_df, on=["code", "end_date"], how="left")
+        yitems_df2 = yitems_df2.select(yitems_df.columns+[end_point])
+        yitems_df2 = yitems_df2.rename({
+            end_point: "end_price"
+        })
+        
+        # yitemsを連結
+        yitems_df = yitems_df1.join(yitems_df2, on=["code", "settlement_date", "start_date"], how="left")
+        
+        # 騰落率列を追加して必要な列のみselect
+        yitems_df = yitems_df.with_columns([
+            ((pl.lit(100)*(pl.col("end_price")-pl.col("start_price"))/pl.col("start_price")).round(1)).alias("price_change_rate")
+        ])
+        yitems_df = yitems_df.select(["code", "settlement_date", "price_change_rate"])
+        
+        # 連結
+        result_df = yitems_df.join(df, on=["code", "settlement_date"], how="left")
+        result_df = result_df.select(df.columns+["price_change_rate"])
+        
+        
+        return result_df
     
     # 決算期間中における株価騰落を求めるための引数一覧をpl.DataFrameで取得する
     # 取得されるdfの列は、"code", "start_date", "end_date"
@@ -893,7 +992,7 @@ class KessanPl():
         df = df.sort(by=["code", "settlement_date"])
         
         
-        return df
+        return df    
 
     # 決算データスクレイピング時のバグを修正。
     # バグはすでに修正されているが、databaseのレコードが修正されていないため、暫定的にpolars.DataFrameを読み込んだ後に修正する
