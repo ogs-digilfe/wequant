@@ -639,7 +639,7 @@ class KessanPl():
         df = df.drop(["tmp"])
         
         return df
-    
+
     # 年度決算の実績値における、当該年度の四半期決算の進捗率をpl.DataFrameで作成し、返す
     def get_actual_quatery_settlements_progress_rate(self) -> pl.DataFrame:
         # 四半期単体決算のsales～filal_profitの同一決算期における累積列を追加
@@ -711,8 +711,31 @@ class KessanPl():
         return df
 
 
+    # codeで指定した銘柄のsettlement_typeで指定した決算のvaluation_date時点における期首、期末のannouncement_daetを取得する
+    # valuation_date = date.today()のような場合はまだ期末決算が発表されていないので、その場合においてはdate(2999, 12, 31)を期末として返す
+    def get_current_settlement_period_by_announcement_date(self, code: int, valuation_date: date, settlement_type: Literal["四", "本"]) -> tuple:
+        df = self.df
 
+        df = df.filter(pl.col("code")==code)\
+            .filter(pl.col("settlement_type")==settlement_type)
 
+        df = df.with_columns([
+            pl.col("announcement_date").alias("start_date"),
+            pl.col("announcement_date").shift(-1).alias("end_date")
+        ])
+
+        df1 = df.filter(pl.col("start_date")<valuation_date)\
+            .filter(pl.col("end_date")>=valuation_date)
+        
+        if df1.shape[0] == 0:
+            df2 = df.filter(pl.col("start_date")<valuation_date)
+            start_date = df2["announcement_date"].to_list()[-1]
+            end_date = date(2999, 12, 31)
+        else:
+            start_date = df1["start_date"].to_list()[0]
+            end_date = df1["end_date"].to_list()[0]
+
+        return start_date, end_date
 
 
 
@@ -993,6 +1016,26 @@ class KessanPl():
         
         
         return df    
+
+    # codeで指定した銘柄のsettlement_date, settlement_typeで指定した決算の機首、期末のannouncement_daetを取得する
+    # 期首は前期の決算発表日を返す
+    def get_settlement_period_by_announcement_date(self, code: int, settlement_date: date, settlement_type: Literal["四", "本"]) -> tuple:
+        df = self.df
+
+        df = df.filter(pl.col("code")==code)\
+            .filter(pl.col("settlement_type")==settlement_type)
+        
+        df = df.with_columns([
+            pl.col("announcement_date").alias("end_date"),
+            pl.col("announcement_date").shift(1).alias("start_date")
+        ])
+
+        df = df.filter(pl.col("settlement_date")==settlement_date)
+
+        start_date = df["start_date"].to_list()[0]
+        end_date = df["end_date"].to_list()[0]
+
+        return start_date, end_date
 
     # 決算データスクレイピング時のバグを修正。
     # バグはすでに修正されているが、databaseのレコードが修正されていないため、暫定的にpolars.DataFrameを読み込んだ後に修正する
