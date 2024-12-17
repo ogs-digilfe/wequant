@@ -401,6 +401,120 @@ def get_yearly_settlement_date(dataframe_row) -> date:
 
     return r+(date(y, m, d),)
 
+# 信用取引データの加工/分析
+class CreditbalancePl():
+    # dfがセットされていれば、self.dfにセット
+    # fpがセットされていれば、fpで指定するpathから信用残履歴のparquet fileを読み込んでself.dfをセット
+    # dfもfpもセットされていなければ、所定のファイルパスから信用残履歴のparquet fileを読み込んでself.dfにセット
+    def __init__(self, df: Union[pl.DataFrame, None]=None, fp: Union[Path, None]=None):
+        if not df is None:
+            self.df = df
+        elif not fp is None:
+            self.df = pl.read_parquet(fp)
+        else:
+            fp = str(DATA_DIR/"creditbalance.parquet")
+            self.df = pl.read_parquet(fp)
+        
+        # code列をpl.Int64にcast
+        self.df = self.df.with_columns([
+            pl.col("code").cast(pl.Int64)
+        ])
+        
+    
+    ###### getで始まるメソッド
+    # valuation_dateで指定した日における各銘柄の最新の信用倍率リストをpl.DataFrameの形式で返す
+    def get_latest_margin_ratio_df(self, valuation_date: date=date.today()) -> pl.DataFrame:
+        ins = CreditbalancePl(df=self.df)
+        ins.with_columns_margin_ratio()
+        df = ins.df
+
+        df = df.filter(pl.col("date")<=valuation_date)
+
+        # 信用倍率を計算できないので、pl.col("purchase_margin") != 0の銘柄を抽出
+        df = df.filter(pl.col("purchase_margin")!=0)
+
+        df = df.group_by("code").agg([
+            pl.col("date").last(),
+            pl.col("unsold_margin").last(),
+            pl.col("purchase_margin").last(),
+            pl.col("margin_ratio").last()
+        ])
+
+        df = df.sort(by=["code"])
+
+        return df
+
+
+
+
+    ###### filterで始まるメソッド。
+    # 信用売りに対応した銘柄をfilterして、self.dfを書き換える
+    def filter_unsold_margin_target(self):
+        df = self.df
+
+        # 各銘柄の最新データの売残高が0でないリストを作成する
+        exdf = df.group_by(["code"]).agg([
+            pl.col("date").last().alias("date"),
+            pl.col("unsold_margin").last().alias("unsold_margin")
+        ])
+        exdf = exdf.sort(by=["code"])
+        exdf = exdf.filter(pl.col("unsold_margin")!=0)
+        target_s = exdf["code"]
+
+        # 売残高が0でない銘柄のみ、抽出する
+        df = df.filter(pl.col("code").is_in(target_s))
+
+        self.df = df
+    
+    # with_columnsで始まるメソッド
+    # 各銘柄の最新データの売り残が0でない銘柄を抽出し、margin_ratio列(信用倍率=売残/買残)を追加。
+    # CreditbalancePl.dfを書き換える
+    def with_columns_margin_ratio(self):
+        self.filter_unsold_margin_target()
+
+        df = self.df
+        df = df.with_columns([
+            (pl.col("unsold_margin")/pl.col("purchase_margin")).round(2).alias("margin_ratio")
+        ])
+
+        self.df = df
+    
+    # 信用残高が、dailyの出来高の何倍あるかを計算した列"unsold_margin_volume_ratio"列と"purchase_margin_volume_ratio"列を追加する。
+    # termでは、volumeの移動平均の日数を指定する。
+    def with_columns_margin_volume_ratio(self, term: int=25):
+        RawPL = PricelistPl(fp=DATA_DIR/"raw_pricelist.parquet")
+        RawPL.with_columns_moving_average(term, col="volume")
+        revpl_df = RawPL.df
+
+        # join moving average of volume
+        df = self.df
+        ori_cols = df.columns
+        vol_col = f'ma{str(term)}'
+        df = df.join(revpl_df, on=["code", "date"], how="left")
+        df = df.drop_nulls()
+        df = df.select(ori_cols+[vol_col])
+
+        # margin_volume_ratio列を追加
+        col1 = "unsold_margin"
+        col2 = "purchase_margin"
+        acol1 = "unsold_margin_volume_ratio"
+        acol2 = "purchase_margin_volume_ratio"
+        added_cols = [acol1, acol2]
+
+        # margin_volume_ratio列を追加
+        df = df.with_columns([
+            (pl.col(col1)/pl.col(vol_col)).round(2).alias(acol1),
+            (pl.col(col2)/pl.col(vol_col)).round(2).alias(acol2),
+        ])
+        df = df.select(ori_cols+[vol_col]+added_cols)
+        df = df.rename({vol_col: f'volume_ma{str(term)}'})
+
+        self.df = df
+
+
+
+
+
 
 
 # private classes

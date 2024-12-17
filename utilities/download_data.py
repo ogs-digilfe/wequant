@@ -15,6 +15,7 @@ from lib_api import Client
 
 # download可能なファイル
 DOWNLOADABLE_FILES = [
+    "creditbalance.parquet",
     "finance_quote.parquet",
     "kessan.parquet",
     "meigaralist.parquet",
