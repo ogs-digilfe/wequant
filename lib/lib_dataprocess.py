@@ -419,9 +419,38 @@ class CreditbalancePl():
         self.df = self.df.with_columns([
             pl.col("code").cast(pl.Int64)
         ])
-        
+
+    ###### filterで始まるメソッド。
+    # 信用売りに対応した銘柄をfilterして、self.dfを書き換える
+    def filter_unsold_margin_target(self):
+        df = self.df
+
+        # 各銘柄の最新データの売残高が0でないリストを作成する
+        exdf = df.group_by(["code"]).agg([
+            pl.col("date").last().alias("date"),
+            pl.col("unsold_margin").last().alias("unsold_margin")
+        ])
+        exdf = exdf.sort(by=["code"])
+        exdf = exdf.filter(pl.col("unsold_margin")!=0)
+        target_s = exdf["code"]
+
+        # 売残高が0でない銘柄のみ、抽出する
+        df = df.filter(pl.col("code").is_in(target_s))
+
+        self.df = df        
     
     ###### getで始まるメソッド
+    # valuation_dateで指定した日における各銘柄の最新のデータのみ抽出してpl.DataFrameの形式で返す
+    # CreditbalancePl.dfは書き換えない。
+    # 更新が止まった銘柄は抽出しない。
+    def get_latest_df(self, valuation_date: date=date.today()) -> pl.DataFrame:
+        df = self.df
+
+        df = df.filter(pl.col("date")<=valuation_date)
+        latest_date = df["date"].max()
+        df = df.filter(pl.col("date")==latest_date)
+
+        return df
     # valuation_dateで指定した日における各銘柄の最新の信用倍率リストをpl.DataFrameの形式で返す
     def get_latest_margin_ratio_df(self, valuation_date: date=date.today()) -> pl.DataFrame:
         ins = CreditbalancePl(df=self.df)
@@ -442,31 +471,78 @@ class CreditbalancePl():
 
         df = df.sort(by=["code"])
 
-        return df
-
-
-
-
-    ###### filterで始まるメソッド。
-    # 信用売りに対応した銘柄をfilterして、self.dfを書き換える
-    def filter_unsold_margin_target(self):
+        return df    
+    
+    ###### with_columnsで始まるメソッド
+    # 売残、買残それぞれについて前週との差分列を追加する
+    # CreditbalancePl.dfを書き換える
+    def with_columns_diff_margin(self):
         df = self.df
 
-        # 各銘柄の最新データの売残高が0でないリストを作成する
-        exdf = df.group_by(["code"]).agg([
-            pl.col("date").last().alias("date"),
-            pl.col("unsold_margin").last().alias("unsold_margin")
-        ])
-        exdf = exdf.sort(by=["code"])
-        exdf = exdf.filter(pl.col("unsold_margin")!=0)
-        target_s = exdf["code"]
+        ori_cols = df.columns
 
-        # 売残高が0でない銘柄のみ、抽出する
-        df = df.filter(pl.col("code").is_in(target_s))
+        ccol = "code"
+        scol = "unsold_margin"
+        pcol = "purchase_margin"
+        s_ccol = f'shifted_{ccol}'
+        s_scol = f'shifted_{scol}'
+        s_pcol = f'shifted_{pcol}'
+        df = df.with_columns([
+            pl.col(ccol).shift().alias(s_ccol),
+            pl.col(scol).shift().alias(s_scol),
+            pl.col(pcol).shift().alias(s_pcol)            
+        ])
+
+        d_scol = f'diff_{scol}'
+        d_pcol = f'diff_{pcol}'
+        df = df.with_columns([
+            (pl.col(scol) - pl.col(s_scol)).alias(d_scol),
+            (pl.col(pcol) - pl.col(s_pcol)).alias(d_pcol)            
+        ])
+
+        df = df.filter(pl.col(ccol)==pl.col(s_ccol))
+        df = df.select(ori_cols+[d_scol, d_pcol])
+        df = df.sort(by=["code"])
+
+
 
         self.df = df
-    
-    # with_columnsで始まるメソッド
+
+    # 売残、買残それぞれの前週からの増減率列を追加する
+    # CreditbalancePl.dfを書き換える
+    def with_columns_diff_margin_rate(self):
+        df = self.df
+        ori_cols = df.columns
+
+        ccol = "code"
+        scol = "unsold_margin"
+        pcol = "purchase_margin"
+        s_ccol = f'shifted_{ccol}'
+        s_scol = f'shifted_{scol}'
+        s_pcol = f'shifted_{pcol}'
+        self.df = df.with_columns([
+            pl.col(scol).shift().alias(s_ccol),
+            pl.col(scol).shift().alias(s_scol),
+            pl.col(pcol).shift().alias(s_pcol)            
+        ])
+        self.with_columns_diff_margin()
+        df = self.df
+        df = df.filter(pl.col(ccol)==pl.col(s_ccol))
+
+        d_scol = f'diff_{scol}'
+        d_pcol = f'diff_{pcol}'
+        r_scol = f'{d_scol}_rate'
+        r_pcol = f'{d_pcol}_rate'
+        df = df.with_columns([
+            (pl.lit(100)*pl.col(d_scol)/pl.col(s_scol)).round(1).alias(r_scol),
+            (pl.lit(100)*pl.col(d_pcol)/pl.col(s_pcol)).round(1).alias(r_pcol)
+        ])
+
+        added_cols = [r_scol, r_pcol]
+        df = df.select(ori_cols+added_cols)
+        df = df.sort(by=["code", "date"])
+        self.df = df
+
     # 各銘柄の最新データの売り残が0でない銘柄を抽出し、margin_ratio列(信用倍率=売残/買残)を追加。
     # CreditbalancePl.dfを書き換える
     def with_columns_margin_ratio(self):
@@ -474,7 +550,7 @@ class CreditbalancePl():
 
         df = self.df
         df = df.with_columns([
-            (pl.col("unsold_margin")/pl.col("purchase_margin")).round(2).alias("margin_ratio")
+            (pl.col("purchase_margin")/(pl.col("unsold_margin"))).round(2).alias("margin_ratio")
         ])
 
         self.df = df
