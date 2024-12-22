@@ -521,16 +521,23 @@ class CreditbalancePl():
         s_scol = f'shifted_{scol}'
         s_pcol = f'shifted_{pcol}'
         self.df = df.with_columns([
-            pl.col(scol).shift().alias(s_ccol),
+            pl.col(ccol).shift().alias(s_ccol),
             pl.col(scol).shift().alias(s_scol),
             pl.col(pcol).shift().alias(s_pcol)            
         ])
-        self.with_columns_diff_margin()
+
+        # CreditbalancePl.dfにdiff_*_margin列が無ければ、with_columns_diff_marginメソッドを実行
+        d_scol = f'diff_{scol}'
+        d_pcol = f'diff_{pcol}'
+        if d_scol not in self.df.columns:
+            self.with_columns_diff_margin()
+        # 順番が入れ替わっているので要sort
+        else:
+            self.df = self.df.sort(by=["code", "date"])
+
         df = self.df
         df = df.filter(pl.col(ccol)==pl.col(s_ccol))
 
-        d_scol = f'diff_{scol}'
-        d_pcol = f'diff_{pcol}'
         r_scol = f'{d_scol}_rate'
         r_pcol = f'{d_pcol}_rate'
         df = df.with_columns([
@@ -555,7 +562,8 @@ class CreditbalancePl():
 
         self.df = df
     
-    # 信用残高が、dailyの出来高の何倍あるかを計算した列"unsold_margin_volume_ratio"列と"purchase_margin_volume_ratio"列を追加する。
+    # 信用残高が、dateにおける日足出来高移動平均の何倍あるかを計算した列"unsold_margin_volume_ratio"列と"purchase_margin_volume_ratio"、及び日足出来高移動平均列"ma_{term}"を追加する。
+    # CreditbalancePl.dfを書き換える
     # termでは、volumeの移動平均の日数を指定する。
     def with_columns_margin_volume_ratio(self, term: int=25):
         RawPL = PricelistPl(fp=DATA_DIR/"raw_pricelist.parquet")
@@ -588,7 +596,36 @@ class CreditbalancePl():
         self.df = df
 
 
+    # 週でグループ化できるように、日付から週グループのインデックス列を追加する
+    # PricelistPl.dfに列を追加する
+    def with_columns_weekid(self) -> None:
+        df = self.df
 
+        # 週でグルーピングできるように週ラベル列を追加する。
+        min_date = df["date"].min() # 1が月曜日
+        min_date_weekday = min_date.weekday() + 1 #datetime.date.weekday()は0が月曜日なので補正(土日は営業日でないので、これで良い)
+
+        # 起点日を日曜日にそろえる
+        # 月曜日に揃えると、起点日が月曜日のときに、差が0dではなく、0msとなって、データ型が他と異なってしまうため。
+        delta = min_date_weekday
+        min_date = min_date - relativedelta(days=delta)
+        # 起点日からの日数列を追加する
+        df = df.with_columns([
+            (pl.col("date")-pl.lit(min_date)).alias("delta_days")
+        ])
+        # 日数列をint型にcast
+        df = df.with_columns([
+            (pl.col("delta_days")/(24*60*60*1000)).cast(pl.Int16).alias("delta_days")
+        ])
+        # 週ラベル列を追加
+        df = df.with_columns([
+            (pl.col("delta_days")/7).cast(pl.Int16).alias("weekid")
+        ])
+        # いらない列をdrop
+        df = df.drop(["delta_days"])
+        
+        
+        self.df = df
 
 
 
@@ -686,6 +723,88 @@ class PricelistPl():
             }
             self.df = self.df.rename(rename_map_dct)
 
+    # PricelistPlをdailyからweeklyに変更する。
+    # 変更される列は、open, high, low, close, volumeのみ。
+    # with_columns_*メソッド等で後から追加された統計データ列は、すべて集約関数last()の実行結果である週最終営業日のデータに変換されるので要注意。
+    # PricelistPl.dfは日足データから週足データに変換される。
+    def convert_daily_to_weekly(self) -> None:
+        # 週をグループ化("weekid"列を追加)
+        self.with_columns_weekid()
+
+        df = self.df
+        core_cols = ["code", "date", "open", "high", "low", "close", "volume"]
+        ori_cols = df.columns
+        appendix_cols = [c for c in ori_cols if c not in core_cols]
+
+        # 銘柄と週idで集約
+        # core_colsの集約
+        df1 = df.group_by(["code", "weekid"]).agg([
+            pl.col("date").last().alias("date"),
+            pl.col("open").first().alias("open"),
+            pl.col("high").max().alias("high"),
+            pl.col("low").min().alias("min"),
+            pl.col("close").last().alias("close"),
+            pl.col("volume").sum().alias("volume")
+        ])
+
+        # appendix_colsの集約を追加する
+        dfs = []
+        # group_byのkeyをremove
+        appendix_cols.remove("weekid")
+        for c in appendix_cols:
+            ldf = df.group_by("code", "weekid").agg([
+                pl.col(c).last().alias(c)
+            ])
+            dfs.append(ldf)
+        for ldf in dfs:
+            df1 = df1.join(ldf, on=["code", "weekid"], how="left")
+        df = df1
+
+        '''
+        # 月曜日/金曜日の日付列を追加
+        # weekday列を追加
+        df = df.with_columns([
+            pl.col("date").dt.weekday().alias("weekday")
+        ])
+        # 月曜日
+        # 月曜日との日数差分列"mon_delta"を追加
+        df = df.with_columns([
+            (pl.col("weekday")-pl.lit(1)).alias("mon_delta")
+        ])
+        df = df.with_columns([
+            (pl.col("mon_delta") * pl.duration(days=1)).alias("mon_delta")
+        ])
+        # date_mon列を追加
+        df = df.with_columns([
+            (pl.col("date") - pl.col("mon_delta")).alias("date_mon")
+        ])
+
+        # 金曜日
+        # 金曜日との日数差分列"fri_delta"を追加
+        df = df.with_columns([
+            (pl.lit(5) - pl.col("weekday")).alias("fri_delta")
+        ])
+        df = df.with_columns([
+            (pl.col("fri_delta") * pl.duration(days=1)).alias("fri_delta")
+        ])
+        # date_fri列を追加
+        df = df.with_columns([
+            pl.when(pl.col("fri_delta")==pl.duration(days=0))
+            .then(pl.col("date"))
+            .otherwise(pl.col("date")+pl.col("fri_delta"))
+            .alias("date_fri")
+        ])
+
+        # 計算に使った列をdrop
+        df = df.drop(["weekid", "weekday", "mon_delta", "fri_delta"])
+        '''
+        df = df.drop(["weekid"])
+
+        # sort
+        df = df.sort(by=["code", "date"])
+        
+        self.df = df
+
     # 指定したコードの指定した日付における最新の終値の株価を、(日付, 株価)のタプルで返す
     def get_latest_dealingdate_and_price(self, code: int, valuation_date: date = date.today()) -> tuple:
         df = self.df
@@ -714,7 +833,16 @@ class PricelistPl():
         df1 = idf1.join(self.df, on=idf1.columns, how="left")
         
         return df1
+    
+    # 当日の始値~終値の騰落率列を追加
+    def with_columns_daily_updown_rate(self) -> None:
+        df = self.df
         
+        df = df.with_columns([
+            (pl.lit(100) * (pl.col("close") - pl.col("open")) / pl.col("open")).round(2).alias("daily_updown_rate")
+        ])
+        
+        self.df = df
 
     # colで指定した列のterm日の移動平均列を、25日移動平均であれば、ma25の
     # ような列名(maの後ろに移動平均の日数)で追加する。
@@ -754,6 +882,71 @@ class PricelistPl():
         df = df.select(self.df.columns + [moving_average_col_name])
     
         self.df = df
+
+    # 週でグループ化できるように、日付から週グループのインデックス列を追加する
+    # PricelistPl.dfに列を追加する
+    def with_columns_weekid(self) -> None:
+        df = self.df
+
+        # 週でグルーピングできるように週ラベル列を追加する。
+        min_date = df["date"].min() # 1が月曜日
+        min_date_weekday = min_date.weekday() + 1 #datetime.date.weekday()は0が月曜日なので補正(土日は営業日でないので、これで良い)
+
+        # 起点日を日曜日にそろえる
+        # 月曜日に揃えると、起点日が月曜日のときに、差が0dではなく、0msとなって、データ型が他と異なってしまうため。
+        delta = min_date_weekday
+        min_date = min_date - relativedelta(days=delta)
+        # 起点日からの日数列を追加する
+        df = df.with_columns([
+            (pl.col("date")-pl.lit(min_date)).alias("delta_days")
+        ])
+        # 日数列をint型にcast
+        df = df.with_columns([
+            (pl.col("delta_days")/(24*60*60*1000)).cast(pl.Int16).alias("delta_days")
+        ])
+        # 週ラベル列を追加
+        df = df.with_columns([
+            (pl.col("delta_days")/7).cast(pl.Int16).alias("weekid")
+        ])
+        # いらない列をdrop
+        df = df.drop(["delta_days"])
+
+        self.df = df
+    
+    # colで指定した列のwindow_sizeの移動zsocre列を、25日移動平均であれば、zs25の
+    # ような列名(zsの後ろに移動zscoreの日数)で追加する。
+    # PricelistPl.dfに直接列を追加。
+    def with_columns_moving_zscore(self, window_size: int=25, col: str="volume") -> None:
+        df = self.df
+        ori_cols = df.columns
+        additional_col = f'zs{str(window_size)}'
+        
+        # 移動平均列と標準偏差列を追加
+        std_col = f'rstd{str(window_size)}'
+        av_col = f'rma{str(window_size)}'
+        df = df.with_columns([
+            pl.col("code").shift(window_size-1).alias("scode"),
+            pl.col("volume").rolling_mean(window_size).alias(av_col),
+            pl.col("volume").rolling_std(window_size).alias(std_col)
+        ])
+        #無効レコードのav_col列とstd_col列の値をnullに。
+        for c in [av_col, std_col]:
+            df = df.with_columns([
+                pl.when(pl.col("code")==pl.col("scode"))
+                .then(pl.col(c))
+                .otherwise(pl.lit(None))
+                .alias(c)
+            ])
+        # zscore列を追加
+        df = df.with_columns([
+            ((pl.col(col)-pl.col(av_col))/pl.col(std_col)).round(2).alias(additional_col)
+        ])
+        
+        # 途中計算に使った列を削除
+        df = df.select(ori_cols+[additional_col])
+        
+        self.df = df
+
 
 class KessanPl():
     def __init__(self, df: pl.DataFrame):
@@ -2171,14 +2364,15 @@ class PricelistFig():
         self._update_layout()
     
     # 指定した日に縦線を引く
+    # colorで、引く線の色を指定できるが、plotlyのcolorlabelでのみ指定可能とした。
     # ただし、start_date > target_date or end_date < target_dateの場合は無視される
-    def add_vline(self, target_date: date) -> None:
+    def add_vline(self, target_date: date, color: str="grey") -> None:
         if self.start_date > target_date or self.end_date < target_date:
             return
 
         self.fig.add_vline(
             x=target_date.strftime(DATEFORMAT),
-            line=dict(color='grey', width=1),  # 色やスタイルのカスタマイズ
+            line=dict(color=color, width=1),  # 色やスタイルのカスタマイズ
             opacity=0.5
         )
         
