@@ -883,36 +883,6 @@ class PricelistPl():
     
         self.df = df
 
-    # 週でグループ化できるように、日付から週グループのインデックス列を追加する
-    # PricelistPl.dfに列を追加する
-    def with_columns_weekid(self) -> None:
-        df = self.df
-
-        # 週でグルーピングできるように週ラベル列を追加する。
-        min_date = df["date"].min() # 1が月曜日
-        min_date_weekday = min_date.weekday() + 1 #datetime.date.weekday()は0が月曜日なので補正(土日は営業日でないので、これで良い)
-
-        # 起点日を日曜日にそろえる
-        # 月曜日に揃えると、起点日が月曜日のときに、差が0dではなく、0msとなって、データ型が他と異なってしまうため。
-        delta = min_date_weekday
-        min_date = min_date - relativedelta(days=delta)
-        # 起点日からの日数列を追加する
-        df = df.with_columns([
-            (pl.col("date")-pl.lit(min_date)).alias("delta_days")
-        ])
-        # 日数列をint型にcast
-        df = df.with_columns([
-            (pl.col("delta_days")/(24*60*60*1000)).cast(pl.Int16).alias("delta_days")
-        ])
-        # 週ラベル列を追加
-        df = df.with_columns([
-            (pl.col("delta_days")/7).cast(pl.Int16).alias("weekid")
-        ])
-        # いらない列をdrop
-        df = df.drop(["delta_days"])
-
-        self.df = df
-    
     # colで指定した列のwindow_sizeの移動zsocre列を、25日移動平均であれば、zs25の
     # ような列名(zsの後ろに移動zscoreの日数)で追加する。
     # PricelistPl.dfに直接列を追加。
@@ -946,7 +916,73 @@ class PricelistPl():
         df = df.select(ori_cols+[additional_col])
         
         self.df = df
+    
+    # 前営業日の終値から当営業日の始値までの騰落率列を追加する。
+    # directionで、dateの前日終値と当日始値("yesterday")の騰落率列を追加するか、dateの終値と翌営業日始値("tomorrow")の騰落率列を追加するか選択できる。
+    # PricelistPl.dfに直接列("overnight_updown"列)を追加する。
+    def with_columns_overnight_updown(self, direction: Literal["yesterday", "tomorrow"]="yesterday") -> None:
+        df = df1 = self.df
+        ori_cols = df.columns
+        addtional_col = "overnight_updown_rate"
 
+        if direction == "yesterday":
+            shiftnum = 1
+            shifted_col = "close"
+            start_col = f'{shifted_col}2'
+            end_col = "open"
+        elif direction == "tomorrow":
+            shiftnum = -1
+            shifted_col = "open"
+            start_col = "close"
+            end_col = f'{shifted_col}2'
+
+        df = df.with_columns([
+            pl.col("code").shift(shiftnum).alias("code2"),
+            pl.col(shifted_col).shift(shiftnum).alias(f'{shifted_col}2')
+        ])
+        df = df.with_columns([
+            (pl.lit(100)*(pl.col(end_col) - pl.col(start_col))/pl.col(start_col)).round(2).alias(addtional_col)
+        ])
+        df = df.filter(pl.col("code")==pl.col("code2"))
+
+        # filterで消えたレコードの復活(additional_colはnull)
+        df = df1.join(df, on=["code", "date"], how="left")
+        df = df.select(ori_cols+[addtional_col])
+
+
+        # df = df.select(ori_cols + addtional_col)
+        self.df = df
+
+
+    # 週でグループ化できるように、日付から週グループのインデックス列を追加する
+    # PricelistPl.dfに列を追加する
+    def with_columns_weekid(self) -> None:
+        df = self.df
+
+        # 週でグルーピングできるように週ラベル列を追加する。
+        min_date = df["date"].min() # 1が月曜日
+        min_date_weekday = min_date.weekday() + 1 #datetime.date.weekday()は0が月曜日なので補正(土日は営業日でないので、これで良い)
+
+        # 起点日を日曜日にそろえる
+        # 月曜日に揃えると、起点日が月曜日のときに、差が0dではなく、0msとなって、データ型が他と異なってしまうため。
+        delta = min_date_weekday
+        min_date = min_date - relativedelta(days=delta)
+        # 起点日からの日数列を追加する
+        df = df.with_columns([
+            (pl.col("date")-pl.lit(min_date)).alias("delta_days")
+        ])
+        # 日数列をint型にcast
+        df = df.with_columns([
+            (pl.col("delta_days")/(24*60*60*1000)).cast(pl.Int16).alias("delta_days")
+        ])
+        # 週ラベル列を追加
+        df = df.with_columns([
+            (pl.col("delta_days")/7).cast(pl.Int16).alias("weekid")
+        ])
+        # いらない列をdrop
+        df = df.drop(["delta_days"])
+
+        self.df = df
 
 class KessanPl():
     def __init__(self, df: pl.DataFrame):
