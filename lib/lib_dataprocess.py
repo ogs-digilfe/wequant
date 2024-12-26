@@ -597,9 +597,11 @@ class CreditbalancePl():
 
 
     # 週でグループ化できるように、日付から週グループのインデックス列を追加する
+    # dailyのdfとweeklyのdfを紐づける(joinする)ときに便利。
     # PricelistPl.dfに列を追加する
     def with_columns_weekid(self) -> None:
         df = self.df
+        date_col = "date"
 
         # 週でグルーピングできるように週ラベル列を追加する。
         min_date = df["date"].min() # 1が月曜日
@@ -611,7 +613,7 @@ class CreditbalancePl():
         min_date = min_date - relativedelta(days=delta)
         # 起点日からの日数列を追加する
         df = df.with_columns([
-            (pl.col("date")-pl.lit(min_date)).alias("delta_days")
+            (pl.col(date_col)-pl.lit(min_date)).alias("delta_days")
         ])
         # 日数列をint型にcast
         df = df.with_columns([
@@ -991,12 +993,18 @@ class KessanPl():
             df = df.rename({
                 "mcode": "code"
             })
-        
-        self.df = df
 
         # スクレイパーによるbugによる誤データの修正。
-        # バグはすでに修正されているが、databaseのレコードも修正であり、暫定的に読み込んだpolaras.DataFrameを修正することとした
-        self.df = self.revice_settlement_date_bug()
+        # バグはすでに修正されているが、databaseのレコードも修正が必要であり、未修整状態なので、暫定的に読み込んだpolaras.DataFrameを修正することとした
+        self.df = df
+        df = self.revice_settlement_date_bug()
+
+        # 更新がとまった古いデータは、利用不可能な古いデータがstockdbに残ってしまっているので、落とす
+        df = df.filter(pl.col("settlement_date")>date(2017, 1, 1))
+        condition = (df["settlement_date"] < date(2018, 1, 1)) & (df["settlement_type"] == "予")
+        df = df.filter(~condition)
+
+        self.df = df
         
     def filter_settlement_type(self, settlement_type: Literal["quaterly", "yearly"]) -> None:
         df = self.df
@@ -1278,9 +1286,6 @@ class KessanPl():
         df = df.filter(pl.col("settlement_type")=="予")\
             .filter(pl.col("settlement_date")>last_settlement_date)\
             .filter(pl.col("settlement_date")<(pl.col("settlement_date")+pl.duration(days=370)))
-
-        print(last_settlement_date)
-            
 
         return df
 
@@ -1959,6 +1964,56 @@ class KessanPl():
         df = df.filter(pl.col("announcement_date")>pl.col("announcement_date_right"))
 
         self.df = df
+    
+    # 週でグループ化できるように、日付から週グループのインデックス列を追加する
+    # dailyのdfとweeklyのdfを紐づける(joinする)ときに便利。
+    # KessanPl.dfに列を追加する
+    def with_columns_weekid(self) -> None:
+        # 決算発表日が正しく取得できていないレコードを、暫定的に決算日の60日後にセットする
+        self._revice_irregular_announcement_date()
+
+        df = self.df
+        date_col = "announcement_date"
+
+        # 週でグルーピングできるように週ラベル列を追加する。
+        min_date = df[date_col].min() # 1が月曜日
+        min_date_weekday = min_date.weekday() + 1 #datetime.date.weekday()は0が月曜日なので補正(土日は営業日でないので、これで良い)
+
+        # 起点日を日曜日にそろえる
+        # 月曜日に揃えると、起点日が月曜日のときに、差が0dではなく、0msとなって、データ型が他と異なってしまうため。
+        delta = min_date_weekday
+        min_date = min_date - relativedelta(days=delta)
+        # 起点日からの日数列を追加する
+        df = df.with_columns([
+            (pl.col(date_col)-pl.lit(min_date)).alias("delta_days")
+        ])
+        # 日数列をint型にcast
+        df = df.with_columns([
+            (pl.col("delta_days")/(24*60*60*1000)).cast(pl.Int16).alias("delta_days")
+        ])
+        # 週ラベル列を追加
+        df = df.with_columns([
+            (pl.col("delta_days")/7).cast(pl.Int16).alias("weekid")
+        ])
+        # いらない列をdrop
+        df = df.drop(["delta_days"])
+
+        self.df = df
+    
+    # scrapingの際、正しく決算発表日が取得できなかったレコードを、仮にdate(1900, 1, 1)としstockdbにinsertされているが、
+    # これだとうまく解析ができないため、KessanPl.dfの該当レコードの決算発表日を一旦仮で決算日の60日後で書き換える。
+    def _revice_irregular_announcement_date(self) -> None:
+        df = self.df
+
+        col = "announcement_date"
+        df = df.with_columns([
+            pl.when(pl.col(col)==date(1900, 1, 1))
+            .then((pl.col("settlement_date")+pl.duration(days=60)).alias(col))
+            .otherwise(pl.col(col).alias(col))
+        ])
+
+
+        self.df = df
 
     def _sort_df(self):
         df = self.df
@@ -2411,8 +2466,26 @@ class PricelistFig():
             line=dict(color=color, width=1),  # 色やスタイルのカスタマイズ
             opacity=0.5
         )
-        
-        
+
+    # 決算発表日にvlineを引く
+    # weekly, monthly未対応    
+    def add_vline_announcement_date(self, color: str="orange") -> None:
+        start_date = self.start_date
+        end_date = self.end_date
+
+        # 決算発表日の取得
+        fp = DATA_DIR/"kessan.parquet"
+        df = read_data(fp)
+        KPL = KessanPl(df)
+        df = KPL.df
+        df = df.filter(pl.col("code")==self.code)\
+            .filter(pl.col("announcement_date")>=start_date)\
+            .filter(pl.col("announcement_date")<=end_date)
+        dates = df["announcement_date"].to_list()
+
+        # 決算発表日にvlineを引く
+        for d in dates:
+            self.add_vline(d, color) 
     
     def _update_layout(self):
         fig = self.fig
