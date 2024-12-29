@@ -985,18 +985,24 @@ class PricelistPl():
         df = df.drop(["delta_days"])
 
         self.df = df
-
+# 決算データを読み込んで加工する。
+# dfをセットしない場合はデフォルトパスのparquetファイルからデータを読み込んでKessanPl.dfをセットする。        
 class KessanPl():
-    def __init__(self, df: pl.DataFrame):
+    def __init__(self, df: Union[pl.DataFrame, None]=None):
+        if df is None:
+            fp = DATA_DIR/"kessan.parquet"
+            df = read_data(fp)
+
         # 列名を変更
         if "mcode" in df.columns:
             df = df.rename({
                 "mcode": "code"
             })
-
+            
+        self.df = df
+        
         # スクレイパーによるbugによる誤データの修正。
         # バグはすでに修正されているが、databaseのレコードも修正が必要であり、未修整状態なので、暫定的に読み込んだpolaras.DataFrameを修正することとした
-        self.df = df
         df = self.revice_settlement_date_bug()
 
         # 更新がとまった古いデータは、利用不可能な古いデータがstockdbに残ってしまっているので、落とす
@@ -1257,6 +1263,29 @@ class KessanPl():
         
         df = df.sort(by=["announcement_date"], descending=[True])
         df = df[:num]
+        
+        return df
+
+    # valuation_date時点で発表済最新の全銘柄の四半期決算リストを返す
+    def get_latest_quater_settlements(self, valuation_date: date=date.today()) -> pl.DataFrame:
+        df = self.df
+
+        df = df.filter(pl.col("settlement_type")=="四")\
+            .filter(pl.col("announcement_date")<=valuation_date)
+            
+        # 最新のものにしぼる
+        df1 = df.select(["code","announcement_date"])
+        df1 = df1.group_by(["code"]).agg([
+            pl.col("announcement_date").last()
+        ])
+        
+        # 更新のとまったデータを除外する
+        start_date = valuation_date - relativedelta(days=93)
+        df1 = df1.filter(pl.col("announcement_date")>=start_date)
+        
+        # dfをdf1にleft joinして最新四半期決算情報のみ取得する
+        df = df1.join(df, on=["code", "announcement_date"], how="left")
+        
         
         return df
     
@@ -1943,9 +1972,6 @@ class KessanPl():
         
         self.df = df
         self._sort_df()
-
-
-
 
     # 作りかけ
     def with_columns_settlements_progress_rate(self) -> None:
