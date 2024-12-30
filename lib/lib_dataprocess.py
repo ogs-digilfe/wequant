@@ -686,7 +686,7 @@ class PricelistPl():
     # fp = filenameの場合、dirはDATA_DIR
     # fp = filepathの場合、fpはfilepathとして処理
     # fp = pl.DataFrameの場合はそのままPricelistPl.dfにpl.DataFrameをセット
-    def __init__(self, fp: Union[str, Path, pl.DataFrame]):
+    def __init__(self, fp: Union[str, Path, pl.DataFrame]="reviced_pricelist.parquet"):
         if type(fp) == type(pl.DataFrame()):
             self.df = fp
         else:
@@ -823,18 +823,42 @@ class PricelistPl():
     # items_dfにpl.DataFrame.columns = ["code", "start_date", "end_date"]のpl.DataFrameを与えると、
     # 各レコードのstart_dateからend_dateまでの株価騰落率の列を追加して返す
     # *_pointは、起点(start)と終点(end)において、日足ローソクのどの時点の株価を起点、または終点とするか選択する。
-    def get_stockprice_change_rate(self, 
+    def get_stockprice_updown_rate(self, 
         items_df: pl.DataFrame,
         start_point: Literal["open", "high", "low", "close"] = "open",
         end_point: Literal["open", "high", "low", "close"] = "open"
     ) -> pl.DataFrame:
         
-        idf1 = items_df.with_columns([
-            pl.col("start_date").alias("date")
-        ]).select(["code", "date"])
-        df1 = idf1.join(self.df, on=idf1.columns, how="left")
+        df = self.df
+        idf1 = items_df.select(["code", "start_date"])
+        df1 = idf1.join(df, on=["code"], how="left")
+        df1 = df1.filter(pl.col("date")>=pl.col("start_date"))
+        df1 = df1.group_by(["code"]).agg([
+            pl.col("date").first().alias("date"),
+            pl.col("start_date").first().alias("start_date"),
+            pl.col(start_point).first().alias("start")
+        ])
+        df1 = df1.sort(by=["code"])
+
+        idf2 = items_df.select(["code", "end_date"])
+        df2 = idf2.join(df, on=["code"], how="left")
+        df2 = df2.filter(pl.col("date")<=pl.col("end_date"))
+        df2 = df2.group_by(["code"]).agg([
+            pl.col("date").last().alias("date"),
+            pl.col("end_date").last().alias("end_date"),
+            pl.col(end_point).last().alias("end")
+        ])
+        df2 = df2.sort(by=["code"])
         
-        return df1
+        df = df1.join(df2, on=["code"], how="left")
+        df = df.with_columns([
+            (pl.lit(100) * (pl.col("end") - pl.col("start")) / pl.col("start")).round(2).alias("updown_rate")
+        ])
+        
+        df = df.select(["code", "start_date", "end_date", "updown_rate"])
+
+        
+        return df
     
     # 当日の始値~終値の騰落率列を追加
     def with_columns_daily_updown_rate(self) -> None:
@@ -1288,6 +1312,62 @@ class KessanPl():
         
         
         return df
+
+    # valuation_dateで指定した日が含まれる四半期の株価上昇率列を追加した各銘柄の決算リストを返す。
+    # 指定した日が含まれる四半期が決算発表前の場合は、四半期が始まってから、指定した日までの株価上昇率を計算する。
+    # 株価上昇率は決算発表翌営業日始値～次の決算発表日当日の終値までで計算。
+    def get_quater_settlement_price_updownrate(self, valuation_date: date=date.today()) -> None:
+        df = self.df
+        ori_cols = df.columns
+        
+        # 次の決算発表日列を追加
+        df = df.filter(pl.col("settlement_type")=="四")
+        df = df.with_columns([
+            pl.col("code").shift(-1).alias("code2"),
+            pl.col("announcement_date").shift(-1).alias("announcement_date2")
+        ])
+        # 翌営業日以降になるように、"annoucement_dateに1日を追加
+        df = df.with_columns([
+            (pl.col("announcement_date") + pl.duration(days=1)).alias("announcement_date")
+        ])
+        # valuation_dateを含む行を抽出
+        df = df.filter(pl.col("announcement_date")<=valuation_date)
+        df = df.group_by(["code"]).agg([
+            pl.col("code2").last(),
+            pl.col("settlement_date").last(),
+            pl.col("announcement_date").last(),
+            pl.col("announcement_date2").last()
+            
+        ])
+        df = df.with_columns([
+            pl.when(pl.col("code2").is_null())
+            .then(pl.col("code"))
+            .otherwise(pl.col("code2"))
+            .alias("code2"),
+            pl.when(pl.col("announcement_date2").is_null())
+            .then(pl.lit(valuation_date))
+            .otherwise(pl.col("announcement_date2"))
+            .alias("announcement_date2")
+        ])
+        df = df.with_columns([
+            pl.when(pl.col("code") != pl.col("code2"))
+            .then(pl.lit(valuation_date))
+            .otherwise(pl.col("announcement_date2"))
+            .alias("announcement_date2")
+        ])
+        df = df.filter((pl.lit(valuation_date) - pl.col("announcement_date")) < pl.duration(days=100))
+        df = df.rename({
+            "announcement_date": "start_date",
+            "announcement_date2": "end_date"
+        })
+        kpl_df = df.select(["code", "start_date", "end_date"])
+        
+        RevPl = PricelistPl()
+        kpl_df = RevPl.get_stockprice_change_rate(kpl_df, )
+        
+        
+        
+        return kpl_df
     
     # codeで指定された銘柄のvaluation_date時点における発表済決算予想の発表推移をpl.DataFrameで返す
     # this_settlement_periodをTrueにセットすると、valuation_dateを含む期の決算予想のみに絞る
@@ -1972,7 +2052,7 @@ class KessanPl():
         
         self.df = df
         self._sort_df()
-
+    
     # 作りかけ
     def with_columns_settlements_progress_rate(self) -> None:
         # KessanPl.dfに年度決算日列を追加
