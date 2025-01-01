@@ -682,6 +682,68 @@ class FinancequotePl():
         
         return PricelistPl(df).df
 
+class IndexPricelistPl():
+    def __init__(self, fp: Union[str, Path, pl.DataFrame]="nh225.parquet"):
+        if type(fp) == type(pl.DataFrame()):
+            self.df = fp
+        else:
+            fp = str(fp)
+            data_dir, filename = os.path.split(fp)
+            # filenameのみ指定された場合は、DATA_DIR
+            if data_dir == "":
+                data_dir = str(DATA_DIR)
+                fp = str(DATA_DIR/fp)
+            
+            # 管理対象外ファイルの場合、raise ValueError
+            # ただし、tmp_で始まるfile名はok
+            if (not filename in DOWNLOADABLE_FILES) and (not "tmp_" in filename):
+                raise ValueError(f'ファイル名{filename}は、wequantで管理していないファイルです。ファイル名を確認してください。')
+            
+            # ファイルをダウンロードしていなかったらraise FileNotFoundError
+            utility_fp = str(PJROOT_DIR/"download_data.py")
+            if not os.path.exists(fp):
+                message = f'''
+                ファイル{filename}が、データ保存フォルダ{data_dir}にダウンロードされていません。
+                {utility_fp}を実行するなどしてデータをダウンロードしてください。
+                '''
+                raise ValueError(message)
+            
+            self.df = pl.read_parquet(fp)
+
+        # 列のrenameをしてない場合は、rename。
+        if "p_key" in self.df.columns:
+            rename_map_dct = {
+                "p_key": "date",
+                "p_open": "open",
+                "p_high": "high",
+                "p_low": "low",
+                "p_close": "close"
+            }
+            self.df = self.df.rename(rename_map_dct)
+    
+    # items_dfにpl.DataFrame.columns = ["code", "start_date", "end_date"]のpl.DataFrameを与えると、
+    # 各レコードのstart_dateからend_dateまでの株価騰落率の列を追加して返す
+    # *_pointは、起点(start)と終点(end)において、日足ローソクのどの時点の株価を起点、または終点とするか選択する。
+    def get_stockprice_updown_rate(self, 
+        items_df: pl.DataFrame,
+        start_point: Literal["open", "high", "low", "close"] = "open",
+        end_point: Literal["open", "high", "low", "close"] = "open"
+    ) -> pl.DataFrame:
+
+        # start_dateの株価取得
+        df = self.df
+        idf1 = items_df.select(["code", "start_date"])
+        df1 = idf1.join(df, on=["code"], how="left")
+        df1 = df1.filter(pl.col("date")>=pl.col("start_date"))
+        df1 = df1.group_by(["code"]).agg([
+            pl.col("date").first().alias("date"),
+            pl.col("start_date").first().alias("start_date"),
+            pl.col(start_point).first().alias("start")
+        ])
+        df1 = df1.sort(by=["code"])
+        
+        return df1
+
 class PricelistPl():
     # fp = filenameの場合、dirはDATA_DIR
     # fp = filepathの場合、fpはfilepathとして処理
@@ -942,6 +1004,24 @@ class PricelistPl():
         df = df.select(ori_cols+[additional_col])
         
         self.df = df
+    
+    # date列の日のpricelist_nh225の日足データを紐づける
+    def with_columns_nh225(self) -> None:
+        NhPL = IndexPricelistPl()
+        
+        df1 = self.df
+        df2 = NhPL.df
+        
+        df = df1.join(df2, on=["date"], how="left")
+        df = df.rename({
+            "open_right": "nh_open",
+            "high_right": "nh_high",
+            "low_right": "nh_low",
+            "close_right": "nh_close"
+        })
+        
+        self.df = df
+        
     
     # 前営業日の終値から当営業日の始値までの騰落率列を追加する。
     # directionで、dateの前日終値と当日始値("yesterday")の騰落率列を追加するか、dateの終値と翌営業日始値("tomorrow")の騰落率列を追加するか選択できる。
@@ -1278,7 +1358,7 @@ class KessanPl():
         return df
 
     # codeで指定した銘柄のvaluation_date時点で発表済の四半期決算を、新しいものからnum個返す
-    def get_latest_quater_settlement(self, code: int, valuation_date: date=date.today(), num: int=8) -> None:
+    def get_latest_quater_settlement(self, code: int, valuation_date: date=date.today(), num: int=8) -> pl.DataFrame:
         df = self.df
 
         df = df.filter(pl.col("code")==code)\
@@ -1316,10 +1396,15 @@ class KessanPl():
     # valuation_dateで指定した日が含まれる四半期の株価上昇率列を追加した各銘柄の決算リストを返す。
     # 指定した日が含まれる四半期が決算発表前の場合は、四半期が始まってから、指定した日までの株価上昇率を計算する。
     # 株価上昇率は決算発表翌営業日始値～次の決算発表日当日の終値までで計算。
-    def get_quater_settlement_price_updownrate(self, valuation_date: date=date.today()) -> None:
+    def get_quater_settlement_price_updown_rate(self, valuation_date: date=date.today(), index: Literal["nh225", None]=None) -> pl.DataFrame:
         df = self.df
-        ori_cols = df.columns
         
+        # 同期間のindexの騰落率列も追加したい場合は、self.get_quater_settlement_price_updown_rate()の結果を返す
+        if not index is None:
+            self.get_quater_settlement_price_updown_rate()
+            return
+        
+        # indexの騰落率列を追加しない場合
         # 次の決算発表日列を追加
         df = df.filter(pl.col("settlement_type")=="四")
         df = df.with_columns([
@@ -1363,8 +1448,65 @@ class KessanPl():
         kpl_df = df.select(["code", "start_date", "end_date"])
         
         RevPl = PricelistPl()
-        kpl_df = RevPl.get_stockprice_change_rate(kpl_df, )
+        kpl_df = RevPl.get_stockprice_updown_rate(kpl_df, start_point="open", end_point="close")
         
+        return kpl_df
+
+    # valuation_dateで指定した日が含まれる四半期の株価上昇率列を追加した各銘柄の決算リストを返す。
+    # 指定した日が含まれる四半期が決算発表前の場合は、四半期が始まってから、指定した日までの株価上昇率を計算する。
+    # 株価上昇率は決算発表翌営業日始値～次の決算発表日当日の終値までで計算。
+    def get_quater_settlement_price_updown_rate_with_index(self, valuation_date: date=date.today(), index: Literal["nh225"]="nh225") -> pl.DataFrame:
+        df = self.df
+
+        # 次の決算発表日列を追加
+        df = df.filter(pl.col("settlement_type")=="四")
+        df = df.with_columns([
+            pl.col("code").shift(-1).alias("code2"),
+            pl.col("announcement_date").shift(-1).alias("announcement_date2")
+        ])
+        # 翌営業日以降になるように、"annoucement_dateに1日を追加
+        df = df.with_columns([
+            (pl.col("announcement_date") + pl.duration(days=1)).alias("announcement_date1")
+        ])
+        # valuation_dateを含む行を抽出
+        df = df.filter(pl.col("announcement_date1")<=valuation_date)
+        df = df.group_by(["code"]).agg([
+            pl.col("code2").last(),
+            pl.col("settlement_date").last(),
+            pl.col("announcement_date1").last(),
+            pl.col("announcement_date2").last()
+            
+        ])
+        # valuation_dateが期中のレコードのnull処理
+        df = df.with_columns([
+            pl.when(pl.col("code2").is_null())
+            .then(pl.col("code"))
+            .otherwise(pl.col("code2"))
+            .alias("code2"),
+            pl.when(pl.col("announcement_date2").is_null())
+            .then(pl.lit(valuation_date))
+            .otherwise(pl.col("announcement_date2"))
+            .alias("announcement_date2")
+        ])
+        df = df.with_columns([
+            pl.when(pl.col("code") != pl.col("code2"))
+            .then(pl.lit(valuation_date))
+            .otherwise(pl.col("announcement_date2"))
+            .alias("announcement_date2")
+        ])
+        df = df.filter((pl.lit(valuation_date) - pl.col("announcement_date1")) < pl.duration(days=100))
+        df = df.rename({
+            "announcement_date1": "start_date",
+            "announcement_date2": "end_date"
+        })
+        kpl_df = df.select(["code", "start_date", "end_date"])
+
+        # ここから
+        # nh225のget_stockprice_updown_rateメソッドを作ること。
+        #RevPl = PricelistPl()
+        #kpl_df = RevPl.get_stockprice_updown_rate(kpl_df, start_point="open", end_point="close")
+        
+
         
         
         return kpl_df
