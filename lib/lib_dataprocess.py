@@ -747,6 +747,7 @@ class IndexPricelistPl():
         df = self.df    
         df = df.filter(pl.col("date")<=end_date)
         df = df.filter(pl.col("date")==pl.col("date").max())
+        
         end_price = df[end_point][0]
         
         updown_rate = round(100 * (end_price - start_price) / start_price, 2)
@@ -1455,6 +1456,10 @@ class KessanPl():
         RevPl = PricelistPl()
         kpl_df = RevPl.get_stockprice_updown_rate(kpl_df, start_point="open", end_point="close")
         
+        # 決算データは存在するが、日足データが存在しない銘柄がある。
+        # updown_rateがnullになってしまうので、dropする。
+        kpl_df = kpl_df.drop_nulls()
+        
         # 同期間のindexの騰落率列の追加をしない場合は、kpl_dfをreturn
         if index is None:
             return kpl_df
@@ -1466,6 +1471,7 @@ class KessanPl():
             r = list(r)
             start_date = r[1]
             end_date = r[2]
+            
             nh_updown_rate = NhPL.get_updown_rate(start_date, end_date, "open", "close")
             
             r.append(nh_updown_rate)
