@@ -401,6 +401,15 @@ def get_yearly_settlement_date(dataframe_row) -> date:
 
     return r+(date(y, m, d),)
 
+# r = (<code>, <start_date>, <end_date>)をrecord引数として受け取り、
+# r = (<code>, <start_dateからend_dateまでの日経平均の騰落率>)を返す
+def get_nh_updown_rate(r):
+    NhPL = IndexPricelistPl()
+    
+    
+    
+    return r
+
 # 信用取引データの加工/分析
 class CreditbalancePl():
     # dfがセットされていれば、self.dfにセット
@@ -721,28 +730,29 @@ class IndexPricelistPl():
             }
             self.df = self.df.rename(rename_map_dct)
     
-    # items_dfにpl.DataFrame.columns = ["start_date", "end_date"]のpl.DataFrameを与えると、
-    # 各レコードのstart_dateからend_dateまでの株価騰落率の列を追加して返す
-    # *_pointは、起点(start)と終点(end)において、日足ローソクのどの時点の株価を起点、または終点とするか選択する。
-    def get_stockprice_updown_rate(self, 
-        items_df: pl.DataFrame,
-        start_point: Literal["open", "high", "low", "close"] = "open",
-        end_point: Literal["open", "high", "low", "close"] = "open"
-    ) -> pl.DataFrame:
-
-        # start_dateの株価取得
-        df = self.df
-        idf1 = items_df.select(["start_date"])
-        df1 = idf1.join(df, on=["start"], how="left")
-        df1 = df1.filter(pl.col("date")>=pl.col("start_date"))
-        df1 = df1.group_by(["code"]).agg([
-            pl.col("date").first().alias("date"),
-            pl.col("start_date").first().alias("start_date"),
-            pl.col(start_point).first().alias("start")
-        ])
-        df1 = df1.sort(by=["code"])
+    # start_dateからend_dateまでの騰落率を返す
+    # start_point, end_pointで始まりと終わりの４本値のどの値を選択するか指定できる。
+    def get_updown_rate(self,
+            start_date: date, 
+            end_date: date, 
+            start_point: Literal["open", "high", "low", "close"] = "open",
+            end_point: Literal["open", "high", "low", "close"] = "open"
+        ) -> float:
         
-        return df1
+        df = self.df    
+        df = df.filter(pl.col("date")>=start_date)
+        df = df.filter(pl.col("date")==pl.col("date").min())
+        start_price = df[start_point][0]
+
+        df = self.df    
+        df = df.filter(pl.col("date")<=end_date)
+        df = df.filter(pl.col("date")==pl.col("date").max())
+        end_price = df[end_point][0]
+        
+        updown_rate = round(100 * (end_price - start_price) / start_price, 2)
+        
+        return updown_rate
+        
 
 class PricelistPl():
     # fp = filenameの場合、dirはDATA_DIR
@@ -1450,20 +1460,21 @@ class KessanPl():
             return kpl_df
         
         # indexの騰落率を追加する場合は以下、続き。
-        nh_df = IndexPricelistPl().df
-        # 計算量を減らすためのfilter
-        min_day = kpl_df["start_date"].min()
-        max_day = kpl_df["end_date"].max()
-        nh_df = nh_df.filter(pl.col("date")>=min_day).filter(pl.col("date")<=max_day)
-        # kpl_dfのstart_dateと連結する
-        nh_df = nh_df.with_columns([
-            pl.col("date").alias("start_date"),
-            pl.col("date").alias("end_date"),
-        ])
-        kpl_df = kpl_df.join(nh_df, on=["start_date"], how="left")
+        NhPL = IndexPricelistPl()
+        tbl = []
+        for r in kpl_df.iter_rows():
+            r = list(r)
+            start_date = r[1]
+            end_date = r[2]
+            nh_updown_rate = NhPL.get_updown_rate(start_date, end_date, "open", "close")
+            
+            r.append(nh_updown_rate)
+            tbl.append(r)
         
-        
-        return kpl_df
+        cols = kpl_df.columns+["nh_updown_rate"]
+        df = pl.DataFrame(tbl, schema=cols, orient="row")
+            
+        return df
         
         
         
