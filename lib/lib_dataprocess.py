@@ -644,7 +644,13 @@ class CreditbalancePl():
 # private classes
 # 日々の財務データの加工/分析
 class FinancequotePl():
-    def __init__(self, df: pl.DataFrame):
+    def __init__(self, df: Union[pl.DataFrame, None]=None):
+        # dfの読み込み
+        if df is None:
+            fp = str(DATA_DIR/"finance_quote.parquet")
+            df = pl.read_parquet(fp)
+        
+        # 列名を修正
         rename_map_dct = {
             "mcode": "code",
             "p_key": "date",
@@ -2285,7 +2291,11 @@ class KessanPl():
         self.df = df
 
 class MeigaralistPl():
-    def __init__(self, df: pl.DataFrame):
+    def __init__(self, df: Union[pl.DataFrame, None]=None):
+        # dfの読み込み
+        if df is None:
+            fp = str(DATA_DIR/"meigaralist.parquet")
+            df = pl.read_parquet(fp)
         # 列名を変更
         if "mcode" in df.columns:
             df = df.rename({
@@ -2301,7 +2311,12 @@ class MeigaralistPl():
 
 # shikiho.parquetを読みこんでデータの抽出、加工、分析などを行う
 class ShikihoPl():
-    def __init__(self, df: pl.DataFrame):
+    def __init__(self, df: Union[pl.DataFrame, None]=None):
+        # dfの読み込み
+        if df is None:
+            fp = str(DATA_DIR/"shikiho.parquet")
+            df = pl.read_parquet(fp)
+        
         # 列名を変更
         if "mcode" in df.columns:
             df = df.rename({
