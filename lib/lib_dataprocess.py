@@ -669,6 +669,83 @@ class FinancequotePl():
 
         return df
     
+    # 指定した日における最新の各種ファンダメンタルズのレコードをpl.DataFrameで返す
+    def get_finance_quotes(self, valuation_date: date=date.today()) -> pl.DataFrame:
+        df = self.df
+
+        df = df.filter(pl.col("date")<=valuation_date)
+        df = df.filter(pl.col("date")==pl.col("date").max())
+
+        return df    
+    
+    # 指定したcodeの指定した日における株価と各種ファンダメンタルズデータをまとめて標準出力する
+    # pricelist_dfは、raw_pricelistかreviced_pricelistかケースに応じて使い分ける。
+    def print_finance_info(self, 
+            code: int,
+            pricelist_type: Literal[
+                "raw_pricelist", 
+                "reviced_pricelist"
+            ] = "raw_pricelist",
+            valuation_date: date = date.today()
+        ) -> None:
+
+        # タイトルの出力
+        company_name = get_companyname(code)
+        print(f'{company_name}({code})の銘柄情報\n')
+
+        # 株価情報の出力
+        PPL = PricelistPl(f'{pricelist_type}.parquet')
+        tup = PPL.get_latest_dealingdate_and_price(code, valuation_date)
+        stock_price = tup[1]
+        print(f'終値: {stock_price}円({tup[0].strftime(DATEFORMAT2)})')
+
+        
+        # その他指標(finance_quoteデータが存在しない場合は、出力をスキップ)
+        df = self.df
+        if not "market_cap" in df.columns:
+            self.with_columns_market_cap()
+        
+        df = df.filter(pl.col("code")==code)\
+            .filter(pl.col("date")<=valuation_date)
+        
+        if df.shape[0] == 0:
+            print(f'{company_name}({code})は、{valuation_date.strftime(DATEFORMAT2)}以前の財務データがないため、財務情報の出力をスキップ')
+            return
+        
+        df = df.filter(pl.col("date")==pl.col("date").max())
+        quoted_date = df.select(["date"]).row(0)[0]
+        # 予想配当利回り
+        expected_dividened_yield = df.select(["expected_dividend_yield"]).row(0)[0]
+        print(f'予想配当利回り: {expected_dividened_yield}%({quoted_date.strftime(DATEFORMAT2)})')
+        # 予想PER
+        expected_PER = df.select(["expected_PER"]).row(0)[0]
+        print(f'予想PER: {expected_PER}倍({quoted_date.strftime(DATEFORMAT2)})')
+        # 実績PBR
+        actual_PBR = df.select(["actual_PBR"]).row(0)[0]
+        print(f'実績PBR: {actual_PBR}倍({quoted_date.strftime(DATEFORMAT2)})')
+        # 自己資本比率
+        actual_CAR = df.select(["actual_CAR"]).row(0)[0]
+        print(f'自己資本比率: {actual_CAR}%({quoted_date.strftime(DATEFORMAT2)})')
+        # 予想ROE/予想ROA
+        actual_BPS = df.select(["actual_BPS"]).row(0)[0]
+        expected_EPS = df.select(["expected_EPS"]).row(0)[0]
+
+        if not expected_EPS is None:
+            expected_ROE = 100*(expected_EPS / actual_BPS)
+            expected_ROE = round(expected_ROE, 2)
+            print(f'予想ROE: {expected_ROE}%({quoted_date.strftime(DATEFORMAT2)})')
+            expected_ROA = expected_ROE * (actual_CAR/100)
+            expected_ROA = round(expected_ROA, 2)
+            print(f'予想ROA: {expected_ROA}%({quoted_date.strftime(DATEFORMAT2)})')
+        else:
+            print(f'予想ROE: 決算予想がないため、表示不可')
+            print(f'予想ROA: 決算予想がないため、表示不可')
+
+        #　時価総額
+        market_capitalization = df.select(["market_cap"]).row(0)[0]
+        market_capitalization = round(market_capitalization/100, 1)
+        print(f'時価総額: {market_capitalization}億円({quoted_date.strftime(DATEFORMAT2)})')
+    
     # PricelistPlとtotal_shares_numを使って時価総額列(百万円)を追加する
     # pricelist_dfを引数で渡さない場合はdataファイルを読み込む
     def with_columns_market_cap(self, pricelist_df: Union[pl.DataFrame, None]=None) -> None:
@@ -689,6 +766,38 @@ class FinancequotePl():
         ])
 
         self.df = df
+
+    # (actul_CAR*expected_EPS)/(100*actual_BPS)=ROA列を追加
+    def with_columns_ROA(self) -> None:
+        df = self.df
+
+        df = df.with_columns([
+            (pl.col("actual_CAR") * pl.col("expected_EPS") / pl.col("actual_BPS")).round(2).alias("ROA")
+        ])
+        
+        self.df = df
+
+    # expected_EPS/actual_BPS=ROE列を追加
+    def with_columns_ROE(self) -> None:
+        df = self.df
+        
+        df = df.with_columns([
+            (pl.lit(100) * pl.col("expected_EPS") / pl.col("actual_BPS")).round(2).alias("ROE")
+        ])
+        
+        self.df = df
+
+    
+    # expected_EPS/actual_BPS=ROE列を追加
+    def with_columns_ROE(self) -> None:
+        df = self.df
+        
+        df = df.with_columns([
+            (pl.lit(100) * pl.col("expected_EPS") / pl.col("actual_BPS")).round(2).alias("ROE")
+        ])
+        
+        self.df = df
+    
     
     # raw_pricelist.parquetを読み込み
     def _read_raw_pricelist(self) -> pl.DataFrame:
@@ -2393,6 +2502,85 @@ class ShikihoPl():
         print(f'  {map_dct["comment1"]}')
         print(f'{map_dct["title2"]}')
         print(f'  {map_dct["comment2"]}')
+        
+        
+        
+# 日経平均などのIndexのローソク足チャートを描画する
+class IndexPricelistFig():
+    def __init__(self,
+        name: Literal["nh225"] = "nh225",
+        start_date: date = date(1900, 1, 1),
+        end_date: date = date(2999, 12, 31),
+        fig_type: Literal["daily", "weekly", "monthly"] = "daily"   #weekly, monthly未作成
+    ):
+
+        # IndexPricelistFigのプロパティ
+        if name == "nh225":
+            self.display_name = "日経225平均"
+        self.start_date = start_date
+        self.end_date = end_date
+        self.ticknum = 10
+        self.tickangle = 45
+        
+        
+        # データの読み込みとfilter
+        fp = str(DATA_DIR/f'{name}.parquet')
+        df = pl.read_parquet(fp)
+        df = IndexPricelistPl(df).df
+        df = df.filter(pl.col("date")>=start_date)\
+            .filter(pl.col("date")<=end_date)
+        df = df.with_columns([
+            pl.col("date").dt.strftime(DATEFORMAT).alias("date")
+        ])
+        
+        self.df = df
+        self.set_fig()
+    
+    def set_fig(self):
+        pddf = self.df.to_pandas()
+
+        # ローソクチャートを追加
+        fig = go.Figure(data=[
+            go.Candlestick(
+                x=pddf["date"],
+                open=pddf["open"],
+                high=pddf["high"],
+                low=pddf["low"],
+                close=pddf["close"],
+                name="株価"
+            )
+        ])
+
+        # x軸の日付ラベルをセット
+        row_num = self.df.shape[0]
+        if row_num <= self.ticknum:
+            self.tickvals = pddf["date"]
+        else:
+            step = int(row_num/self.ticknum)
+            self.tickvals = pddf["date"][::step]
+        
+        # layoutのセット
+        chart_start = self.df["date"].min()
+        chart_end = self.df["date"].max()
+
+        fig.update_layout(
+            title=f'{self.display_name}株価ローソクチャート{chart_start} ～ {chart_end}',
+            xaxis_rangeslider_visible=False,  # レンジスライダーを非表示
+            xaxis=dict(
+                title="取引日",
+                type='category',
+                tickvals=self.tickvals,
+                tickangle = self.tickangle
+                # type="linear" # x軸を連続データとして扱う
+            ),  # 下段のX軸にタイトルを設定
+            yaxis=dict(title="株価"),  # 上段のY軸
+            # showlegend=False  # 凡例を非表示
+            height= 600  #高さの設定
+        )
+        
+        self.fig = fig
+
+        
         
         
         
