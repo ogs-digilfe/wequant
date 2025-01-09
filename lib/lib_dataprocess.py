@@ -1518,10 +1518,34 @@ class KessanPl():
         
         
         return df
+    
     # valuation_dateを含む全銘柄の四半期決算リストを返す
     def get_quater_settlements_including_valuation_date(self, valuation_date: date=date.today()) -> pl.DataFrame:
-        pass
+        df = self.df
+        
+        df = df.filter(pl.col("settlement_type")=="四")\
+            .filter(pl.col("announcement_date")>=valuation_date)
+        
+        # 存在しなければ、空のdataframeを返す
+        if df.shape[0] == 0:
+            print(f'{valuation_date.strftime(DATEFORMAT2)}を含む決算期で、決算発表された銘柄は存在しません。')
+            return df
+        
+        # valuation_dateを含む四半期決算決算一覧を取得
+        df1 = df.select(["code", "announcement_date"])
+        df1 = df1.group_by(["code"]).agg([
+            pl.col("announcement_date").first()
+        ])
 
+        # valuation_dateを含む決算情報のないデータを除外する
+        end_date = valuation_date + relativedelta(days=110)
+        df1 = df1.filter(pl.col("announcement_date")<=end_date)
+
+        # dfをdf1にleft joinして対象決算情報のみ取得する
+        df = df1.join(df, on=["code", "announcement_date"], how="left")
+        
+        
+        return df
 
     # valuation_dateで指定した日が含まれる四半期の株価上昇率列を追加した各銘柄の決算リストを返す。
     # 指定した日が含まれる四半期が決算発表前の場合は、四半期が始まってから、指定した日までの株価上昇率を計算する。
