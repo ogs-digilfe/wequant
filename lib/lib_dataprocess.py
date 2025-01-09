@@ -1518,6 +1518,10 @@ class KessanPl():
         
         
         return df
+    # valuation_dateを含む全銘柄の四半期決算リストを返す
+    def get_quater_settlements_including_valuation_date(self, valuation_date: date=date.today()) -> pl.DataFrame:
+        pass
+
 
     # valuation_dateで指定した日が含まれる四半期の株価上昇率列を追加した各銘柄の決算リストを返す。
     # 指定した日が含まれる四半期が決算発表前の場合は、四半期が始まってから、指定した日までの株価上昇率を計算する。
