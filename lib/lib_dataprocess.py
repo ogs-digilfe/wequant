@@ -2348,6 +2348,70 @@ class KessanPl():
         self.df = df
         self._sort_df()
     
+    # 前年同期の決算情報列を追加する。
+    # KessanPl.dfのsettlement_type="予"は除外される
+    def with_columns_lastyear_settlement(self) -> None:
+        ori_cols = self.df.columns        
+        # 本決算
+        df1 = self.df
+        df1 = df1.filter(pl.col("settlement_type") == "本")
+        for c in ori_cols:
+            df1 = df1.with_columns([
+                pl.col(c).shift(1).alias(f'ly_{c}')
+            ])
+        df1 = df1.filter(pl.col("code")==pl.col("ly_code"))
+        
+        # 四半期決算
+        df2 = self.df
+        df2 = df2.filter(pl.col("settlement_type") == "四")
+        for c in ori_cols:
+            df2 = df2.with_columns([
+                pl.col(c).shift(4).alias(f'ly_{c}')
+            ])
+        df2 = df2.filter(pl.col("code")==pl.col("ly_code"))
+        # 変則四半期決算を排除する
+        df2 = df2.filter(pl.col("settlement_date").dt.month()==pl.col("ly_settlement_date").dt.month())
+        
+        # df1とdf2をconcat
+        df = pl.concat([df1, df2])
+        df = df.sort(by=["code", "settlement_date", "settlement_type"])
+        
+        self.df = df
+
+    # 次の決算情報列を追加する。
+    # 本決算の場合は翌年の本決算、四半期決算の場合は次四半期決算。
+    # KessanPl.dfのsettlement_type="予"は除外される
+    def with_columns_next_settlement(self) -> None:
+        ori_cols = self.df.columns        
+        # 本決算
+        df1 = self.df
+        df1 = df1.filter(pl.col("settlement_type") == "本")
+        for c in ori_cols:
+            df1 = df1.with_columns([
+                pl.col(c).shift(-1).alias(f'nxt_{c}')
+            ])
+        df1 = df1.filter(pl.col("code")==pl.col("nxt_code"))
+        # 変則決算は除外する
+        df1 = df1.filter(pl.col("settlement_date").dt.month()==pl.col("nxt_settlement_date").dt.month())
+
+        # 四半期決算
+        df2 = self.df
+        df2 = df2.filter(pl.col("settlement_type") == "四")
+        for c in ori_cols:
+            df2 = df2.with_columns([
+                pl.col(c).shift(-1).alias(f'nxt_{c}')
+            ])
+        df2 = df2.filter(pl.col("code")==pl.col("nxt_code"))
+        # 変則四半期決算を排除する
+        df2 = df2.filter(pl.col("nxt_settlement_date")-pl.col("settlement_date")>=pl.duration(days=80))        
+        df2 = df2.filter(pl.col("nxt_settlement_date")-pl.col("settlement_date")<=pl.duration(days=100))
+
+        # df1とdf2をconcat
+        df = pl.concat([df1, df2])
+        df = df.sort(by=["code", "settlement_date", "settlement_type"])
+        
+        self.df = df
+    
     # 作りかけ
     def with_columns_settlements_progress_rate(self) -> None:
         # KessanPl.dfに年度決算日列を追加
