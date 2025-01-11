@@ -2379,6 +2379,52 @@ class KessanPl():
         df = self.df
         df = df.drop_nulls()
         
+        # 売上高
+        c = f'{col_prefix}sales'
+        df = df.with_columns([
+            (pl.col("sales") * (pl.lit(1) + pl.col("sales_growth_rate") / pl.lit(100))).round(0).alias(c)
+        ])
+        df = df.filter(~pl.col(c).is_infinite()).filter(~pl.col(c).is_nan())
+        df = df.with_columns([
+            pl.col(c).cast(pl.Int64)
+        ])
+        # 売上高差分
+        df = df.with_columns([
+            (pl.col(c) - pl.col("sales")).alias(f'{col_prefix}diff_sales')
+        ])
+        # 各種利益
+        p1 = "diff_"
+        p2 = col_prefix
+        col_suffix = "_growth_rate"
+        tcols = [
+            "operating_income",
+            "ordinary_profit",
+            "final_profit"
+        ]
+        
+        #debug
+        print(df.columns)
+        
+        added_cols = []
+        for c in tcols:
+            new_col = f'{p2}{c}'
+            df = df.with_columns([
+                ((pl.col(c) + pl.col("fcst_dgr_diff_sales") * (pl.lit(1) + pl.col(f'{p1}{c}{col_suffix}')) / pl.lit(100)).round(0)).alias(new_col)
+            ])
+            df = df.filter(~pl.col(new_col).is_nan())
+            df = df.with_columns([
+                pl.col(new_col).cast(pl.Int64)
+            ])
+            added_cols.append(new_col)
+        added_cols = ["fcst_dgr_sales"] + added_cols
+        df = df.select(ori_cols+added_cols)
+        
+        # 次決算の日付を列名nxt_settlement_dateで追加する
+        
+        
+        
+
+        
         
         self.df = df
 
