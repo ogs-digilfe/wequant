@@ -1930,42 +1930,6 @@ class KessanPl():
         
         return df
 
-    def with_columns_yearly_settlement_date(self) -> None:
-        df = self.df
-        original_cols = df.columns
-
-        # 最終行の1つ前にsettlement_dateの列indexを、
-        # 最終行にquaterの列indexを追加してget_yearly_settlement_dateで
-        # yearly_settlement_date列を追加できるようにする。
-        sd_idx = original_cols.index("settlement_date")
-        qt_idx = original_cols.index("quater")
-
-        df = df.with_columns([
-            pl.lit(sd_idx).alias("sd_idx"),
-            pl.lit(qt_idx).alias("qt_idx")
-        ])
-
-        df = df.map_rows(get_yearly_settlement_date)
-
-        # 列名を元に戻す
-        col_dct = {}
-        num_original_cols = len(self.df.columns)
-        for i in range(num_original_cols):
-            c1 = f"column_{str(i)}"
-            col_dct[c1] = original_cols[i]
-        
-        # 最終列の列名を変更
-        num_new_cols = len(df.columns)
-        col_dct[f'column_{str(num_new_cols-1)}'] = "yearly_settlement_date"
-
-        # 計算のために追加したいらない列(sd_idxとqt_idx)を削除する
-        df = df.drop([
-            f'column_{str(num_new_cols-2)}',
-            f'column_{str(num_new_cols-3)}'
-        ])
-
-        self.df = df.rename(col_dct)
-
     def with_columns_accumulated_quaterly_settlement(self) -> None:
         # KessanPl.dfに年度決算日列を追加
         self.with_columns_yearly_settlement_date()
@@ -2065,7 +2029,7 @@ class KessanPl():
     # 利益改善度合いを見るために利用する。
     # 決算予想の場合は、昨年度の実績に対して出す。
     # 次期移行の予想はnull。
-    def with_columns_diff_growthrate(self) -> None:
+    def with_columns_diff_growth_rate(self) -> None:
         df = self.df
         ori_cols = df.columns
 
@@ -2088,13 +2052,13 @@ class KessanPl():
         # 追加列を計算する
         # 売上高伸び率
         qdf = qdf.with_columns([
-            ((pl.lit(100)*(pl.col("sales")-pl.col("ly_sales"))/pl.col("ly_sales")).round(1)).alias("sales_growthrate")
+            ((pl.lit(100)*(pl.col("sales")-pl.col("ly_sales"))/pl.col("ly_sales")).round(1)).alias("sales_growth_rate")
         ])
         # 差分利益成率
         target_cols = ["operating_income", "ordinary_profit", "final_profit"]
         for c in target_cols:
             qdf = qdf.with_columns([
-                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/(pl.col("sales")-pl.col("ly_sales"))).round(1)).alias(f"diff_{c}_growthrate")
+                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/(pl.col("sales")-pl.col("ly_sales"))).round(1)).alias(f"diff_{c}_growth_rate")
             ])
 
         # select
@@ -2117,13 +2081,13 @@ class KessanPl():
         # 追加列を計算する
         # 売上高伸び率
         ydf = ydf.with_columns([
-            ((pl.lit(100)*(pl.col("sales")-pl.col("ly_sales"))/pl.col("ly_sales")).round(1)).alias("sales_growthrate")
+            ((pl.lit(100)*(pl.col("sales")-pl.col("ly_sales"))/pl.col("ly_sales")).round(1)).alias("sales_growth_rate")
         ])
         # 差分利益率
         target_cols = ["operating_income", "ordinary_profit", "final_profit"]
         for c in target_cols:
             ydf = ydf.with_columns([
-                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/(pl.col("sales")-pl.col("ly_sales"))).round(1)).alias(f"diff_{c}_growthrate")
+                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/(pl.col("sales")-pl.col("ly_sales"))).round(1)).alias(f"diff_{c}_growth_rate")
             ])
 
         # select
@@ -2152,13 +2116,13 @@ class KessanPl():
         fdf = fdf.join(pydf, on=key_cols, how="left")
         # 売上高伸び率
         fdf = fdf.with_columns([
-            ((pl.lit(100)*(pl.col("sales")-pl.col("ly_sales"))/pl.col("ly_sales")).round(1)).alias("sales_growthrate")
+            ((pl.lit(100)*(pl.col("sales")-pl.col("ly_sales"))/pl.col("ly_sales")).round(1)).alias("sales_growth_rate")
         ])
         # 差分利益率
         target_cols = ["operating_income", "ordinary_profit", "final_profit"]
         for c in target_cols:
             fdf = fdf.with_columns([
-                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/(pl.col("sales")-pl.col("ly_sales"))).round(1)).alias(f"diff_{c}_growthrate")
+                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/(pl.col("sales")-pl.col("ly_sales"))).round(1)).alias(f"diff_{c}_growth_rate")
             ])
         # select
         fdf = fdf.select(ori_cols+qdf.columns[-4:])
@@ -2252,101 +2216,34 @@ class KessanPl():
 
         self.df = df
 
-    # 売上高～純利益までの前年同期からの成長率列を追加する
-    def with_columns_growthrate_lastyear(self):
+    # 前年同期からのsales-final_profitまでの成長率列を追加する。
+    # 追加される列の列名は、gr_{col}
+    # KessanPl.dfのsettlement_type="予"は除外される
+    def with_columns_growth_rate(self):
+        ori_cols = self.df.columns
+        if not "ly_sales" in ori_cols:
+            self.with_columns_lastyear_settlement()
+            
         df = self.df
-        ori_cols = df.columns
+        cols = [
+            "sales", 
+            "operating_income",
+            "ordinary_profit",
+            "final_profit"
+        ]
 
-        # 四半期
-        qdf = df.filter(pl.col("settlement_type")=="四")
-        # 昨年度の列を同じレコードに連結
-        for c in qdf.columns:
-            qdf = qdf.with_columns([
-                pl.col(c).shift(4).alias(f'ly_{c}')
+        added_cols = []
+        for c in cols:
+            lyc = f'ly_{c}'
+            grc = f'gr_{c}'
+            df = df.with_columns([
+                (pl.lit(100) * (pl.col(c) - pl.col(lyc)) / pl.col(lyc)).round(2).alias(grc)
             ])
-        qdf = qdf.with_columns([
-            (pl.col("settlement_date")-pl.col("ly_settlement_date")).alias("diff_sett")
-        ])
-        # 前年同期が比較できるものだけ、filterする
-        qdf = qdf.filter(pl.col("quater")==pl.col("ly_quater"))\
-            .filter(pl.col("diff_sett")>=pl.duration(days=365))\
-            .filter(pl.col("diff_sett")<=pl.duration(days=366))
-        # 追加列を計算する
-        target_cols = ["sales", "operating_income", "ordinary_profit", "final_profit"]
-        # 成長率
-        for c in target_cols:
-            qdf = qdf.with_columns([
-                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/pl.col(f"ly_{c}")).round(1)).alias(f"{c}_growthrate")
-            ])
-        # select
-        qdf = qdf.select(ori_cols+qdf.columns[-4:])
-
-        # 本決算
-        ydf = df.filter(pl.col("settlement_type")=="本")
-        # 昨年度の列を同じレコードに連結
-        for c in ydf.columns:
-            ydf = ydf.with_columns([
-                pl.col(c).shift(1).alias(f'ly_{c}')
-            ])
-        ydf = ydf.with_columns([
-            (pl.col("settlement_date")-pl.col("ly_settlement_date")).alias("diff_sett")
-        ])
-        # 追加列を計算する
-        # 伸び率
-        target_cols = ["sales", "operating_income", "ordinary_profit", "final_profit"]
-        for c in target_cols:
-            ydf = ydf.with_columns([
-                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/pl.col(f"ly_{c}")).round(1)).alias(f"{c}_growthrate")
-            ])
-        # select
-        ydf = ydf.select(ori_cols+qdf.columns[-4:])
-
-
-        # 決算予想
-        fdf = df.filter(pl.col("settlement_type")=="予")
-        fdf = fdf.with_columns([
-            pl.col("settlement_date").alias("key")
-        ])
-        pydf = df.filter(pl.col("settlement_type")=="本")
-        pydf_cols = pydf.columns
-        pydf = pydf.with_columns([
-            (pl.col("settlement_date") + pl.duration(days=364)).alias("key")
-        ])
-        pydf = pydf.map_rows(revice_last_date)
-        pydf.columns = pydf_cols + ["key"]
-        rename_cols = pydf.columns[1:-1]
-        rename_map = {}
-        for c in rename_cols:
-            rename_map[c] = f'ly_{c}'
-        pydf = pydf.rename(rename_map)
-        # 連結
-        key_cols = ["code", "key"]
-        fdf = fdf.join(pydf, on=key_cols, how="left")
-        # 追加列を計算する
-        # 伸び率
-        target_cols = ["sales", "operating_income", "ordinary_profit", "final_profit"]
-        for c in target_cols:
-            fdf = fdf.with_columns([
-                ((pl.lit(100)*(pl.col(c)-pl.col(f"ly_{c}"))/pl.col(f"ly_{c}")).round(1)).alias(f"{c}_growthrate")
-            ])
-        # select
-        fdf = fdf.select(ori_cols+qdf.columns[-4:])
-
-        # それぞれのdfをconcat
-        df = pl.concat([qdf, ydf, fdf])
-
-        # なくなったレコードを元に戻す
-        df2 = self.df
-        df2 = df2.join(df, on=["code", "settlement_date", "announcement_date", "settlement_type"], how="anti")
-        added_cols = df.columns[-4:]
-        for c in added_cols:
-            df2 = df2.with_columns([
-                pl.lit(None, dtype=pl.Float64).alias(c)
-            ])
-        df = pl.concat([df, df2])
+            added_cols.append(grc)
         
+        df = df.select(ori_cols+added_cols)
+            
         self.df = df
-        self._sort_df()
     
     # 前年同期の決算情報列を追加する。
     # KessanPl.dfのsettlement_type="予"は除外される
@@ -2374,6 +2271,13 @@ class KessanPl():
         
         # df1とdf2をconcat
         df = pl.concat([df1, df2])
+        added_cols = [
+            "ly_sales",
+            "ly_operating_income",
+            "ly_ordinary_profit",
+            "ly_final_profit"
+        ]
+        df = df.select(ori_cols + added_cols)
         df = df.sort(by=["code", "settlement_date", "settlement_type"])
         
         self.df = df
@@ -2408,9 +2312,33 @@ class KessanPl():
 
         # df1とdf2をconcat
         df = pl.concat([df1, df2])
+        added_cols = [
+            "nxt_sales",
+            "nxt_operating_income",
+            "nxt_ordinary_profit",
+            "nxt_final_profit"
+        ]
+        df = df.select(ori_cols+added_cols)
         df = df.sort(by=["code", "settlement_date", "settlement_type"])
         
         self.df = df
+    
+    # 前決算(本決算なら昨年、四半期決算なら前四半期)の昨年同期~当期までのdiff_growth_rateを使って予想したsales～final_profitまでの値列を追加する
+    # 追加される列名は、fcst_dgr_{colname}
+    # KessanPl.dfの各銘柄の最新決算については、翌年度の予想レコードも追加。この場合は、sales~filal_profitまでの各列はnull値とする
+    def with_columns_settlement_forcast_by_diff_growth_rate(self) -> None:
+        ori_cols = self.df.columns
+        col_prefix = "fcst_dgr_"
+
+        # KessanPl.dfの最新決算まで
+        if not "diff_operating_income_growth_rate" in ori_cols:
+            self.with_columns_diff_growth_rate()
+
+        df = self.df
+
+        
+        
+        
     
     # 作りかけ
     def with_columns_settlements_progress_rate(self) -> None:
@@ -2464,6 +2392,43 @@ class KessanPl():
         df = df.drop(["delta_days"])
 
         self.df = df
+        
+    def with_columns_yearly_settlement_date(self) -> None:
+        df = self.df
+        original_cols = df.columns
+
+        # 最終行の1つ前にsettlement_dateの列indexを、
+        # 最終行にquaterの列indexを追加してget_yearly_settlement_dateで
+        # yearly_settlement_date列を追加できるようにする。
+        sd_idx = original_cols.index("settlement_date")
+        qt_idx = original_cols.index("quater")
+
+        df = df.with_columns([
+            pl.lit(sd_idx).alias("sd_idx"),
+            pl.lit(qt_idx).alias("qt_idx")
+        ])
+
+        df = df.map_rows(get_yearly_settlement_date)
+
+        # 列名を元に戻す
+        col_dct = {}
+        num_original_cols = len(self.df.columns)
+        for i in range(num_original_cols):
+            c1 = f"column_{str(i)}"
+            col_dct[c1] = original_cols[i]
+        
+        # 最終列の列名を変更
+        num_new_cols = len(df.columns)
+        col_dct[f'column_{str(num_new_cols-1)}'] = "yearly_settlement_date"
+
+        # 計算のために追加したいらない列(sd_idxとqt_idx)を削除する
+        df = df.drop([
+            f'column_{str(num_new_cols-2)}',
+            f'column_{str(num_new_cols-3)}'
+        ])
+
+        self.df = df.rename(col_dct)
+
     
     # scrapingの際、正しく決算発表日が取得できなかったレコードを、仮にdate(1900, 1, 1)としstockdbにinsertされているが、
     # これだとうまく解析ができないため、KessanPl.dfの該当レコードの決算発表日を一旦仮で決算日の60日後で書き換える。
