@@ -1373,6 +1373,28 @@ class KessanPl():
 
         return df
 
+    # valuation_dateが含まれる決算リストの一覧を抽出する
+    # settlement_dateではなく、announcement_dateで抽出。
+    # settlement_type=="予"は抽出対象外。
+    # valuation_dateを含む決算が未発表である場合は抽出されない。
+    def get_current_settlements(self, valuation_date: date) -> pl.DataFrame:
+        df = self.df
+        ori_cols = df.columns
+        
+        df = df.filter(pl.col("settlement_type")!="予")\
+            .filter(pl.col("announcement_date")>=valuation_date)
+        pdf = df.group_by(["code", "settlement_type"]).agg([
+            pl.col("settlement_date").first()
+        ])
+        
+        df = pdf.join(df, on=["code", "settlement_date", "settlement_type"], how="left")
+        
+        df = df.select(ori_cols)
+        df = df.sort(by=["code", "announcement_date", "settlement_type"])
+        
+        return df
+        
+
 
     # codeで指定した銘柄のsettlement_typeで指定した決算のvaluation_date時点における期首、期末のannouncement_daetを取得する
     # valuation_date = date.today()のような場合はまだ期末決算が発表されていないので、その場合においてはdate(2999, 12, 31)を期末として返す
@@ -1700,17 +1722,14 @@ class KessanPl():
     # valuation_dateを含む決算期の直前期決算の対前年同期売上高成長率、対売上高差分利益成長率から計算した決算予想一覧を取得する。
     def get_settlement_forcast_by_diff_growth_rate(self, valuation_date: date=date.today()) -> pl.DataFrame:
         self.with_columns_next_settlement_forcast_by_diff_growth_rate()
-        
-        df = self.df
-        # step1: announcement_dateから抽出できるレコードの抽出
-        df = df.filter(pl.col("announcement_date"))
-        
-        
-        
-        
-        
-        
-        
+        df = self.get_latest_settlements(valuation_date)
+    
+    
+    
+    
+    
+    
+    
         return df
         
 
@@ -2332,6 +2351,8 @@ class KessanPl():
         # df1とdf2をconcat
         df = pl.concat([df1, df2])
         added_cols = [
+            "ly_settlement_date",
+            "ly_announcement_date",
             "ly_sales",
             "ly_operating_income",
             "ly_ordinary_profit",
@@ -2489,11 +2510,6 @@ class KessanPl():
         df = df.with_columns([
             rdf[rdf.columns[-1]].alias("nxt_settlement_date")
         ])
-        
-        
-        
-
-        
         
         self.df = df
 
