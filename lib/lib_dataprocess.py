@@ -1519,6 +1519,46 @@ class KessanPl():
         
         return df
     
+    # valuation_date時点で発表済最新の全銘柄の本決算、四半期決算のリストを返す
+    def get_latest_settlements(self, valuation_date: date=date.today()) -> pl.DataFrame:
+        df1 = self.get_latest_quater_settlements(valuation_date)
+        df2 = self.get_latest_yearly_settlements(valuation_date, settlement_type="本")
+        df3 = self.get_latest_yearly_settlements(valuation_date, settlement_type="予")
+        
+        df = pl.concat([df1, df2, df3])
+
+        # sort
+        df = df.sort([
+            pl.col("code"),
+            pl.col("announcement_date"),
+            pl.col("settlement_type")
+        ])
+        
+        
+        return df
+    
+    # valuation_date時点で発表済最新の全銘柄の本決算、またはリストを返す
+    def get_latest_yearly_settlements(self, valuation_date: date=date.today(), settlement_type: Literal["本", "予"]="本") -> pl.DataFrame:
+        df = self.df
+
+        df = df.filter(pl.col("settlement_type")==settlement_type)\
+            .filter(pl.col("announcement_date")<=valuation_date)
+
+        # 最新のものにしぼる
+        df1 = df.select(["code","announcement_date"])
+        df1 = df1.group_by(["code"]).agg([
+            pl.col("announcement_date").last()
+        ])
+
+        # 更新のとまったデータを除外する
+        start_date = valuation_date - relativedelta(days=400)
+        df1 = df1.filter(pl.col("announcement_date")>=start_date)
+
+        # dfをdf1にleft joinして最新本決算情報のみ取得する
+        df = df1.join(df, on=["code", "announcement_date"], how="left")
+    
+        return df
+    
     # valuation_dateを含む全銘柄の四半期決算リストを返す
     def get_quater_settlements_including_valuation_date(self, valuation_date: date=date.today()) -> pl.DataFrame:
         df = self.df
@@ -1656,6 +1696,23 @@ class KessanPl():
             .filter(pl.col("settlement_date")<(pl.col("settlement_date")+pl.duration(days=370)))
 
         return df
+    
+    # valuation_dateを含む決算期の直前期決算の対前年同期売上高成長率、対売上高差分利益成長率から計算した決算予想一覧を取得する。
+    def get_settlement_forcast_by_diff_growth_rate(self, valuation_date: date=date.today()) -> pl.DataFrame:
+        self.with_columns_next_settlement_forcast_by_diff_growth_rate()
+        
+        df = self.df
+        # step1: announcement_dateから抽出できるレコードの抽出
+        df = df.filter(pl.col("announcement_date"))
+        
+        
+        
+        
+        
+        
+        
+        return df
+        
 
     
     # KessanPlの四半期決算、または通期決算の決算発表日から翌決算発表日までの株価の騰落率列と同期間の日経平均の騰落率列を追加したpl.DataFrameを返す
@@ -1919,6 +1976,9 @@ class KessanPl():
         df2 = df.filter(pl.col("settlement_type")!="四")
         df1 = df1.unique(subset=["code", "settlement_date", "settlement_type"])
         df = pl.concat([df1, df2])
+        
+        # settlement_dateのdayが1になっているものを排除
+        df = df.filter(pl.col("settlement_date").dt.day()!=pl.lit(1))
 
         df = df.sort([
             pl.col("code"),
@@ -2368,7 +2428,7 @@ class KessanPl():
     # 前決算(本決算なら昨年、四半期決算なら前四半期)の昨年同期~当期までのdiff_growth_rateを使って予想したsales～final_profitまでの値列を追加する
     # 追加される列名は、fcst_dgr_{colname}
     # KessanPl.dfの各銘柄の最新決算については、翌年度の予想レコードも追加。この場合は、sales~filal_profitまでの各列はnull値とする
-    def with_columns_settlement_forcast_by_diff_growth_rate(self) -> None:
+    def with_columns_next_settlement_forcast_by_diff_growth_rate(self) -> None:
         ori_cols = self.df.columns
         col_prefix = "fcst_dgr_"
 
@@ -2402,9 +2462,6 @@ class KessanPl():
             "final_profit"
         ]
         
-        #debug
-        print(df.columns)
-        
         added_cols = []
         for c in tcols:
             new_col = f'{p2}{c}'
@@ -2420,6 +2477,18 @@ class KessanPl():
         df = df.select(ori_cols+added_cols)
         
         # 次決算の日付を列名nxt_settlement_dateで追加する
+        # 四半期の場合は、80日、本決算の場合は360日を追加後、各nxt_settlement_dateの月最終日を
+        # map関数で取得する
+        df = df.with_columns([
+            pl.when(pl.col("settlement_type")=="本")
+            .then(pl.col("settlement_date") + pl.duration(days=360))
+            .otherwise(pl.col("settlement_date") + pl.duration(days=80))
+            .alias("col")
+        ])
+        rdf = df.map_rows(revice_last_date)
+        df = df.with_columns([
+            rdf[rdf.columns[-1]].alias("nxt_settlement_date")
+        ])
         
         
         
