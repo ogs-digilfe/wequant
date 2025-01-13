@@ -1731,115 +1731,6 @@ class KessanPl():
     
     
         return df
-        
-
-    
-    # KessanPlの四半期決算、または通期決算の決算発表日から翌決算発表日までの株価の騰落率列と同期間の日経平均の騰落率列を追加したpl.DataFrameを返す
-    # 計算量とメモリ消費量が多いので、KessanPl.dfとpricelist_dfは期間などである程度絞ってやった方が良い。
-    # settlement_typeで、通期決算で騰落率を取得するか、四半期決算で騰落率を取得するか選ぶ。
-    # pricelist_dfが空のdataframe(初期値)の場合、parquetファイルから読み込んでくる。
-    # overnight_biginingをTrueにセットすると、起点の株価として決算発表日当日の株価をセットし、Falseにセットすると、決算発表日翌営業日の株価をセットする。
-    # overnight_endをTrueにセットすると、終点の株価として決算発表日翌営業日の株価をセットし、Falseにセットすると、決算発表日当日の株価をセットする。
-    # *_pointは、期首(bigining)と期末(end)において、日足ローソクのどの時点の株価を起点、または終点とするか選択する。
-    def get_settlement_performance(self,
-        settlement_type: Literal["本", "四"],
-        pricelist_df: pl.DataFrame = pl.DataFrame(),
-        overnight_bigining: bool = False,
-        overnight_end: bool = True,
-        bigining_point: Literal["open", "high", "low", "close"] = "open",
-        end_point: Literal["open", "high", "low", "close"] = "open"
-    ) -> pl.DataFrame:
-        df = self.df
-        df = df.filter(pl.col("settlement_type")==settlement_type)
-        
-        # precelist_df
-        if pricelist_df.shape[0] == 0:
-            fp = DATA_DIR/"reviced_pricelist.parquet"
-            df = read_data(fp)
-            RPL = PricelistPl(df)
-            pricelist_df = RPL.df
-            
-        
-        #　各レコードの決算発表日を元に、騰落率測定開始日と測定終了日のdfを取得
-        yitems_df = self.get_settlement_performance_items_df(
-            settlement_type, 
-            pricelist_df,
-            overnight_bigining,
-            overnight_end
-        )            
-        
-        # yitems_dfにpricelist_dfの該当レコードの株価を連結する
-        # start_date
-        pricelist_df = pricelist_df.with_columns([
-            pl.col("date").alias("start_date")
-        ])
-        yitems_df1 = yitems_df.join(pricelist_df, on=["code", "start_date"], how="left")
-        yitems_df1 = yitems_df1.select(yitems_df.columns+[bigining_point])
-        yitems_df1 = yitems_df1.rename({
-            bigining_point: "start_price"
-        })
-        
-        # end_date
-        pricelist_df = pricelist_df.with_columns([
-            pl.col("start_date").alias("end_date")
-        ])
-        yitems_df2 = yitems_df.join(pricelist_df, on=["code", "end_date"], how="left")
-        yitems_df2 = yitems_df2.select(yitems_df.columns+[end_point])
-        yitems_df2 = yitems_df2.rename({
-            end_point: "end_price"
-        })
-        
-        # yitemsを連結
-        yitems_df = yitems_df1.join(yitems_df2, on=["code", "settlement_date", "start_date"], how="left")
-        
-        # 騰落率列を追加して必要な列のみselect
-        yitems_df = yitems_df.with_columns([
-            ((pl.lit(100)*(pl.col("end_price")-pl.col("start_price"))/pl.col("start_price")).round(1)).alias("updown_rate")
-        ])
-        result1_df = yitems_df.select(["code", "settlement_date", "updown_rate"])
-        
-        # debug
-        print(yitems_df.columns)
-        
-        # 日経平均を連結する
-        nh_df = IndexPricelistPl().df
-        term_df = yitems_df.select(["code", "settlement_date", "start_date", "end_date"])
-        # start_date
-        nh_df1 = nh_df.with_columns([
-            pl.col("date").alias("start_date")
-        ])
-        nh_start_date_df = term_df.join(nh_df1, on=["start_date"], how="left")
-        nh_start_date_df = nh_start_date_df.select([
-            "code", "settlement_date", "start_date", "end_date", bigining_point	
-        ])
-        nh_start_date_df = nh_start_date_df.rename({bigining_point: "start_price"})
-        # end_date
-        nh_df2 = nh_df.with_columns([
-            pl.col("date").alias("end_date")
-        ])
-        nh_end_date_df = term_df.join(nh_df2, on=["end_date"], how="left")
-        nh_end_date_df = nh_end_date_df.select([
-            "code", "start_date", "end_date", end_point	
-        ])
-        nh_end_date_df = nh_end_date_df.rename({end_point: "end_price"})
-        nh_end_date_df = nh_end_date_df.select(["code", "start_date", "end_date", "end_price"])
-        
-        # nh225を連結
-        nh_df = nh_start_date_df.join(nh_end_date_df, on=["code", "start_date", "end_date"], how="left")
-        nh_df = nh_df.unique()
-        nh_df = nh_df.sort(by=["code", "start_date"])
-        
-        # nh225の騰落率を計算
-        nh_df = nh_df.with_columns([
-            (pl.lit(100) * (pl.col("end_price") - pl.col("start_price")) / pl.col("start_price")).round(2).alias("nh_updown_rate")
-        ])
-        
-        # 結果をjoinして不要行/不要列を削除する
-        result_df = result1_df.join(nh_df, on=["code", "settlement_date"], how="left")
-        result_df = result_df.unique().drop_nulls().sort(by=["code", "settlement_date"])
-        result_df = result_df.select("code", "settlement_date", "updown_rate", "nh_updown_rate")
-        
-        return result_df
     
     # 決算期間中における株価騰落を求めるための引数一覧をpl.DataFrameで取得する
     # 取得されるdfの列は、"code", "start_date", "end_date"
@@ -1940,6 +1831,111 @@ class KessanPl():
         end_date = df["end_date"].to_list()[0]
 
         return start_date, end_date
+
+    # KessanPlの四半期決算、または通期決算の決算発表日から翌決算発表日までの株価の騰落率列と同期間の日経平均の騰落率列を追加したpl.DataFrameを返す
+    # 計算量とメモリ消費量が多いので、KessanPl.dfとpricelist_dfは期間などである程度絞ってやった方が良い。
+    # settlement_typeで、通期決算で騰落率を取得するか、四半期決算で騰落率を取得するか選ぶ。
+    # pricelist_dfが空のdataframe(初期値)の場合、parquetファイルから読み込んでくる。
+    # overnight_biginingをTrueにセットすると、起点の株価として決算発表日当日の株価をセットし、Falseにセットすると、決算発表日翌営業日の株価をセットする。
+    # overnight_endをTrueにセットすると、終点の株価として決算発表日翌営業日の株価をセットし、Falseにセットすると、決算発表日当日の株価をセットする。
+    # *_pointは、期首(bigining)と期末(end)において、日足ローソクのどの時点の株価を起点、または終点とするか選択する。
+    def get_settlement_updown_rate(self,
+        settlement_type: Literal["本", "四"],
+        pricelist_df: pl.DataFrame = pl.DataFrame(),
+        overnight_bigining: bool = False,
+        overnight_end: bool = True,
+        bigining_point: Literal["open", "high", "low", "close"] = "open",
+        end_point: Literal["open", "high", "low", "close"] = "open"
+    ) -> pl.DataFrame:
+        df = self.df
+        df = df.filter(pl.col("settlement_type")==settlement_type)
+        
+        # precelist_df
+        if pricelist_df.shape[0] == 0:
+            fp = DATA_DIR/"reviced_pricelist.parquet"
+            df = read_data(fp)
+            RPL = PricelistPl(df)
+            pricelist_df = RPL.df
+            
+        
+        #　各レコードの決算発表日を元に、騰落率測定開始日と測定終了日のdfを取得
+        yitems_df = self.get_settlement_performance_items_df(
+            settlement_type, 
+            pricelist_df,
+            overnight_bigining,
+            overnight_end
+        )            
+        
+        # yitems_dfにpricelist_dfの該当レコードの株価を連結する
+        # start_date
+        pricelist_df = pricelist_df.with_columns([
+            pl.col("date").alias("start_date")
+        ])
+        yitems_df1 = yitems_df.join(pricelist_df, on=["code", "start_date"], how="left")
+        yitems_df1 = yitems_df1.select(yitems_df.columns+[bigining_point])
+        yitems_df1 = yitems_df1.rename({
+            bigining_point: "start_price"
+        })
+        
+        # end_date
+        pricelist_df = pricelist_df.with_columns([
+            pl.col("start_date").alias("end_date")
+        ])
+        yitems_df2 = yitems_df.join(pricelist_df, on=["code", "end_date"], how="left")
+        yitems_df2 = yitems_df2.select(yitems_df.columns+[end_point])
+        yitems_df2 = yitems_df2.rename({
+            end_point: "end_price"
+        })
+        
+        # yitemsを連結
+        yitems_df = yitems_df1.join(yitems_df2, on=["code", "settlement_date", "start_date"], how="left")
+        
+        # 騰落率列を追加して必要な列のみselect
+        yitems_df = yitems_df.with_columns([
+            ((pl.lit(100)*(pl.col("end_price")-pl.col("start_price"))/pl.col("start_price")).round(1)).alias("updown_rate")
+        ])
+        result1_df = yitems_df.select(["code", "settlement_date", "updown_rate"])
+        
+        # 日経平均を連結する
+        nh_df = IndexPricelistPl().df
+        term_df = yitems_df.select(["code", "settlement_date", "start_date", "end_date"])
+        # start_date
+        nh_df1 = nh_df.with_columns([
+            pl.col("date").alias("start_date")
+        ])
+        nh_start_date_df = term_df.join(nh_df1, on=["start_date"], how="left")
+        nh_start_date_df = nh_start_date_df.select([
+            "code", "settlement_date", "start_date", "end_date", bigining_point	
+        ])
+        nh_start_date_df = nh_start_date_df.rename({bigining_point: "start_price"})
+        # end_date
+        nh_df2 = nh_df.with_columns([
+            pl.col("date").alias("end_date")
+        ])
+        nh_end_date_df = term_df.join(nh_df2, on=["end_date"], how="left")
+        nh_end_date_df = nh_end_date_df.select([
+            "code", "start_date", "end_date", end_point	
+        ])
+        nh_end_date_df = nh_end_date_df.rename({end_point: "end_price"})
+        nh_end_date_df = nh_end_date_df.select(["code", "start_date", "end_date", "end_price"])
+        
+        # nh225を連結
+        nh_df = nh_start_date_df.join(nh_end_date_df, on=["code", "start_date", "end_date"], how="left")
+        nh_df = nh_df.unique()
+        nh_df = nh_df.sort(by=["code", "start_date"])
+        
+        # nh225の騰落率を計算
+        nh_df = nh_df.with_columns([
+            (pl.lit(100) * (pl.col("end_price") - pl.col("start_price")) / pl.col("start_price")).round(2).alias("nh_updown_rate")
+        ])
+        
+        # 結果をjoinして不要行/不要列を削除する
+        result_df = result1_df.join(nh_df, on=["code", "settlement_date"], how="left")
+        result_df = result_df.unique().drop_nulls().sort(by=["code", "settlement_date"])
+        result_df = result_df.select("code", "settlement_date", "updown_rate", "nh_updown_rate")
+        
+        return result_df
+
 
     # 決算データスクレイピング時のバグを修正。
     # バグはすでに修正されているが、databaseのレコードが修正されていないため、暫定的にpolars.DataFrameを読み込んだ後に修正する
