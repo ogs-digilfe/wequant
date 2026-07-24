@@ -1,8 +1,0 @@
-requests
-pandas
-polars-lts-cpu
-pyarrow
-pydantic
-jupyterlab
-plotly
-typer

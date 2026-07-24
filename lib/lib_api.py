@@ -1,36 +1,27 @@
-# pathの設定
 from pathlib import Path
-import sys
+import os
+import re
 
-CURRENT_DIR = Path(__file__).parent
-PJROOT_DIR = CURRENT_DIR.parent
-WORKSPACE_DIR = PJROOT_DIR.parent
+import requests
+
+from config import load_deliver_settings
+
+
+PJROOT_DIR = Path(__file__).parent.parent
 DATA_DIR = PJROOT_DIR / "data"
-TMP_DATA_DIR = PJROOT_DIR / "data" / "tmp_data"
-LIB_DIR = PJROOT_DIR / "lib"
-
-sys.path.append(str(WORKSPACE_DIR))
-sys.path.append(str(LIB_DIR))
-
-# import objects
-import requests, os, glob, re
-from settings_wequant import SERVER_HOST, PORT, USERNAME, PASSWORD
-from lib_dataprocess import PricelistPl
-import polars as pl
-
-BASE_URL = f'http://{SERVER_HOST}:{PORT}'
-
-LOGIN_DATA = {
-    "username": USERNAME,
-    "password": PASSWORD
-    # "password": "secret"
-}
     
 # ログインしてtokenを取得
-class Client():
+class Client:
     def __init__(self):
-        url = f'{BASE_URL}/token'
-        token_response = requests.post(url, data=LOGIN_DATA)
+        settings = load_deliver_settings()
+        self.base_url = settings.base_url
+        login_data = {
+            "username": settings.username,
+            "password": settings.password,
+        }
+
+        url = f'{self.base_url}/token'
+        token_response = requests.post(url, data=login_data)
         if token_response.status_code == 200:
             token = token_response.json()["access_token"]
 
@@ -38,8 +29,9 @@ class Client():
                 "Authorization": f"Bearer {token}"
             }
         else:
-            print(token_response)
-            raise ValueError(f'status_code=401: ユーザー"{LOGIN_DATA["username"]}"の認証に失敗しました')
+            raise ValueError(
+                f'status_code={token_response.status_code}: 認証に失敗しました'
+            )
     
     # 差分ダウンロード
     def download(self, filename):
@@ -52,7 +44,7 @@ class Client():
         
         # GETリクエストでファイルをダウンロード
         fp = str(DATA_DIR/filename)
-        url = f'{BASE_URL}/{route}/?filename={filename}'
+        url = f'{self.base_url}/{route}/?filename={filename}'
 
         # コンストラクタで取得したTokenで作成したself.headersをheadersにセットして
         # get requestを送信
@@ -72,7 +64,7 @@ class Client():
         fp = str(fp)
         
         route = "upload-stockdb-parquet-data"
-        url = f'{BASE_URL}/{route}'
+        url = f'{self.base_url}/{route}'
         
         # upload fileが存在しなければ、raise
         if not os.path.exists(fp):
@@ -84,7 +76,10 @@ class Client():
             
             # レスポンスを出力
             if response.status_code == 200:
-                print(f'status_code: {response.status_code} ファイル"{fp}"は"{SERVER_HOST}"にアップロードされました')
+                print(
+                    f'status_code: {response.status_code} '
+                    f'ファイル"{fp}"は"{self.base_url}"にアップロードされました'
+                )
             else:
                 raise ValueError(f'status_code: {response.status_code}')
     

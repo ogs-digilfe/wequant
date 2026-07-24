@@ -1,6 +1,45 @@
 Metadata-Version: 2.4
 Name: wequant
 Version: 0.1.0
-Summary: analysis tool for stock market
-Requires-Python: >=3.10
+Summary: wequant stock market analysis
+Requires-Python: >=3.12
 Description-Content-Type: text/markdown
+Requires-Dist: jupyterlab
+Requires-Dist: pandas>=2.2.3
+Requires-Dist: plotly
+Requires-Dist: polars-lts-cpu
+Requires-Dist: pyarrow
+Requires-Dist: pydantic
+Requires-Dist: python-dotenv
+Requires-Dist: requests
+Requires-Dist: typer
+
+# wequant
+
+## ローカル設定
+
+Deliver APIを利用するコマンドには、ローカルな環境設定が必要です。
+
+1. `.env.sample`を`.env`へコピーします。
+2. `.env`内のプレースホルダーを手元の接続情報へ置き換えます。
+
+```dotenv
+WEQUANT_DELIVER_BASE_URL=https://example.invalid
+WEQUANT_DELIVER_USERNAME=replace-with-your-username
+WEQUANT_DELIVER_PASSWORD=replace-with-your-password
+```
+
+`.env`はGit管理対象外です。設定済みのプロセス環境変数がある場合は、
+その値が`.env`より優先されます。秘密値をログ、Issue、チャット、
+Notebook出力へ記載しないでください。
+
+## Parquetファイルのダウンロード
+
+リポジトリルートから次のコマンドを実行します。
+
+```bash
+python utilities/download_data.py
+```
+
+Deliver APIから取得したParquetファイルは、Git管理対象外の`data/`へ
+保存されます。同名のファイルがすでに存在する場合は上書きされます。

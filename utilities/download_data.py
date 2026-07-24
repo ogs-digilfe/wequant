@@ -27,12 +27,10 @@ DOWNLOADABLE_FILES = [
     "base_portfolio.parquet"
 ]
 
-# fileのダウンロード
-client = Client()
-
 def download_data():
     """最新データをdeliverサーバからdownloadする"""
     print("Downloading latest data from deliver server...")
+    client = Client()
     for f in DOWNLOADABLE_FILES:
         client.download(f)
 
@@ -41,4 +39,3 @@ def download_data():
 
 if __name__ == "__main__":
     download_data()
-
