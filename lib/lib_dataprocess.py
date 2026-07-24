@@ -14,9 +14,10 @@ import os, calendar
 import polars as pl
 import pandas as pd
 from typing import Union, Literal
-from datetime import date
+from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 import plotly.graph_objects as go
+import plotly.express as px
 import plotly.io as pio
 from plotly.subplots import make_subplots
 from plotly.graph_objects import Figure
@@ -28,7 +29,9 @@ DOWNLOADABLE_FILES = [
     "meigaralist.parquet",
     "nh225.parquet",
     "raw_pricelist.parquet",
-    "reviced_pricelist.parquet"
+    "reviced_pricelist.parquet",
+    "shikiho.parquet",
+    "sp500.parquet"
 ]
 
 DATEFORMAT = "%Y-%m-%d"
@@ -638,9 +641,6 @@ class CreditbalancePl():
         
         self.df = df
 
-
-
-
 # private classes
 # 日々の財務データの加工/分析
 class FinancequotePl():
@@ -659,6 +659,34 @@ class FinancequotePl():
 
         self.df = df
     
+    def filter_finance_quotes_by_date(
+    self,
+    specific_date: date = date.today(),
+    inplace: bool = False
+    ) -> pl.DataFrame | None:
+        '''
+        FinancequotePl.dfから、指定日における最新日のデータを抽出する。
+        inplace = Falseの場合は、抽出結果をpl.DataFrameで返す。
+        inplace = Trueの場合は、抽出結果をPortfolioManager.dfにセットしてNoneを返す。
+        '''
+        df = self.df
+
+        df = df.filter(
+            pl.col("date") <= specific_date
+        )
+        latest_date = df["date"].max()
+
+        df = df.filter(
+            pl.col("date") == latest_date
+        )
+
+        if inplace:
+            self.df = df
+            return
+        else:
+            return df
+
+
     # 指定したcodeの指定した日における各種ファンダメンタルズのレコードをpl.DataFrameで返す
     def get_finance_quote(self, code: int, valuation_date: date=date.today()) -> pl.DataFrame:
         df = self.df
@@ -676,7 +704,22 @@ class FinancequotePl():
         df = df.filter(pl.col("date")<=valuation_date)
         df = df.filter(pl.col("date")==pl.col("date").max())
 
-        return df    
+        return df
+
+    # 指定した銘柄の、指定した日の前営業日のfinance_quoteのシングルレコードをpl.DataFrameで返す
+    def get_meigara_lastdate_finance_quote(
+        self,
+        code: int,
+        target_date: date
+    ) -> pl.DataFrame: 
+
+        df = self.df
+
+        df = df.filter(pl.col("code")==code)\
+            .filter(pl.col("date")<target_date)\
+            .tail(1)
+        
+        return df
     
     # 指定したcodeの指定した日における株価と各種ファンダメンタルズデータをまとめて標準出力する
     # pricelist_dfは、raw_pricelistかreviced_pricelistかケースに応じて使い分ける。
@@ -704,6 +747,7 @@ class FinancequotePl():
         df = self.df
         if not "market_cap" in df.columns:
             self.with_columns_market_cap()
+            df = self.df
         
         df = df.filter(pl.col("code")==code)\
             .filter(pl.col("date")<=valuation_date)
@@ -730,7 +774,7 @@ class FinancequotePl():
         actual_BPS = df.select(["actual_BPS"]).row(0)[0]
         expected_EPS = df.select(["expected_EPS"]).row(0)[0]
 
-        if not expected_EPS is None:
+        if not expected_EPS is None and not actual_BPS is None and actual_BPS != 0:
             expected_ROE = 100*(expected_EPS / actual_BPS)
             expected_ROE = round(expected_ROE, 2)
             print(f'予想ROE: {expected_ROE}%({quoted_date.strftime(DATEFORMAT2)})')
@@ -743,7 +787,10 @@ class FinancequotePl():
 
         #　時価総額
         market_capitalization = df.select(["market_cap"]).row(0)[0]
-        market_capitalization = round(market_capitalization/100, 1)
+        if not market_capitalization is None:
+            market_capitalization = round(market_capitalization/100, 1)
+        else:
+            market_capitalization = "-"
         print(f'時価総額: {market_capitalization}億円({quoted_date.strftime(DATEFORMAT2)})')
     
     # PricelistPlとtotal_shares_numを使って時価総額列(百万円)を追加する
@@ -995,6 +1042,86 @@ class PricelistPl():
         
         self.df = df
 
+    def get_downrate_from_max_and_increserate_from_min(
+    self, 
+    valuation_date: date = date.today(),
+    max_price_type: Literal["high", "close"] = "high",
+    min_price_type: Literal["low", "close"] = "low"
+    ) -> pl.DataFrame:
+        '''
+        valuation_date時点以前の各銘柄のmax_price_type列の最高値と、
+        max_price_type列の最高値を記録した取引日より後、valuation_dateより前のmin_price_type列の最安値を取得する。
+        valuation_date時点におけるそれぞれの銘柄の日足株価のレコードの終値に対して、最高値からの株価の下落率と
+        最安値からの株価の上昇率を計算して列として追加し、pl.DataFrameで返す。
+        '''
+        # 元の列を保存
+        ori_cols = self.df.columns
+
+        # 各銘柄の最高値を記録した日付、最高値の株価のリストを取得
+        df1 = self.get_max_pricelist_rec(
+            valuation_date = valuation_date,
+            price_type = max_price_type
+        )
+
+
+        # 各銘柄の最高値記録後における最安値を記録した日付、最安値の株価のリストを取得
+        df2 = self.df
+        df2 = (
+            df2
+            .join(df1, on=["code"], how="left")
+            .filter(pl.col("date") > pl.col("max_date"))
+            .sort(by=["code", min_price_type, "date"], descending=[False, False, True])
+            .group_by("code")
+            .head(1)
+            .select(["code", "max_date", f'max_{max_price_type}', "date", min_price_type])
+            .rename({
+                "date": "min_date",
+                min_price_type: f'min_{min_price_type}'
+            })
+        )
+
+        # valuation_dateにおける銘柄ごとの株価リストを取得
+        df3 = self.df
+        df3 = (
+            df3
+            .filter(pl.col("date")<pl.lit(valuation_date))
+            .sort(by=["code", "date"], descending=[False, True])
+            .group_by("code")
+            .head(1)
+            .join(df2, on=["code"], how="left")
+        )
+
+
+        # 出力データの加工
+        df3 = (
+            df3
+            .with_columns([
+                (pl.lit(100) * (pl.col("close") - pl.col(f'max_{max_price_type}')) / pl.col("close")).round(2).alias("downrate_from_max"),
+                (pl.lit(100) * (pl.col("close") - pl.col(f'min_{min_price_type}')) / pl.col(f'min_{min_price_type}')).round(2).alias("increserate_from_min"),
+                (pl.col("date") - pl.col("max_date")).alias("days_since_max"),
+                (pl.col("date") - pl.col("min_date")).alias("days_since_min")
+            ])  
+        )
+        df3_columns = df3.columns
+        df3 = df3.select(ori_cols + df3_columns[-4:])
+        valid_duration = timedelta(days=3)
+        last_date = df3["date"].max()
+        valid_date = last_date - valid_duration
+        df3 = (
+            df3.with_columns([
+                pl.lit(valid_date).alias("valid_date")
+            ])
+        )
+        df3_cols = df3.columns
+        df3 = (
+            df3
+            .filter(pl.col("date")>=pl.col("valid_date"))
+            .select(df3_cols[:-1])
+        )
+
+        return df3
+
+
     # 指定したコードの指定した日付における最新の終値の株価を、(日付, 株価)のタプルで返す
     def get_latest_dealingdate_and_price(self, code: int, valuation_date: date = date.today()) -> tuple:
         df = self.df
@@ -1007,6 +1134,141 @@ class PricelistPl():
         price = df.select(["close"]).row(0)[0]
 
         return dealing_date, price
+    
+
+    def get_max_pricelist_rec(
+        self, 
+        valuation_date: date = date.today(),
+        price_type: Literal["high", "close"] = "high"
+    ) -> pl.DataFrame:
+        '''
+        valuation_date時点以前の各銘柄のprice_type列の最大値を持つレコードを抽出してpl.DataFrameで返す。
+        '''
+        df = self.df
+
+        # valuation_date以前のデータのみfilter
+        df = df.filter(pl.col("date")<=valuation_date)
+
+        # 集約関数で銘柄ごとの最高値のレコードを取得
+        df = (
+            df
+            .sort(["code", price_type, "date"], descending=[False, True, True])  # highの降順→dateの降順
+            .group_by("code")
+            .head(1)  # 各銘柄の最上位1行（最大highかつ最新日付）
+            .select(["code", "date", price_type])
+            .rename({
+                "date": "max_date",
+                price_type: f'max_{price_type}'
+            })
+        )
+    
+        return df
+    
+    # self.dfにraw_pricelist.parquetがセットされていることを前提として、
+    # reviced_pricelist_dfを作成する
+    def get_reviced_pricelist(self) -> pl.DataFrame:
+        df = self.df
+
+        # df.columnsに"split_rate"列がなければ、raise valueerror    
+        if "split_rate" not in df.columns:
+            raise ValueError("PricelistPl.dfはraw_pricelistである必要があります。")
+        # code列のuniqueなリストを取得
+        codes = df["code"].unique()
+
+        reviced_pricelist_df_schema = schema = {
+            "code": pl.Int64,
+            "date": pl.Date,
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Float64,
+            "accumulated_split_rate": pl.Float64
+        }
+        reviced_pricelist_df = pl.DataFrame(schema=reviced_pricelist_df_schema)
+        for c in codes:
+            pdf = df.filter(pl.col("code")==c)
+            pdf = pdf.sort(by=["date"], descending=True)
+
+            # split_rate列が1でないレコードの抽出
+            split_date_df = pdf.filter(pl.col("split_rate") != 1)
+            sdf = split_date_df
+
+            if sdf.shape[0] == 0:
+                pdf = pdf.with_columns([
+                    pl.col("split_rate").alias("accumulated_split_rate")
+                ])
+                pdf = pdf.select(reviced_pricelist_df_schema)
+                pdf = pdf.sort(by=["date"])
+                reviced_pricelist_df = pl.concat([reviced_pricelist_df, pdf])
+                continue
+
+            # 列の選択
+            sdf = sdf.select(["code", "date", "split_rate"])
+
+            # 1行目レコードの作成
+            first_rec = (sdf["code"][0], date(2999, 12, 31), 1.0)
+            first_df = pl.DataFrame([first_rec], schema=sdf.schema, orient="row")
+
+            # frist_dfとsdfを縦結合
+            sdf = pl.concat([first_df, sdf])
+
+            # 最終行レコードの作成
+            last_rec = (sdf["code"][0], date(1900, 1, 1), 1.0)
+            last_df = pl.DataFrame([last_rec], schema=sdf.schema, orient="row")
+
+            # sdfとlast_dfを縦結合
+            sdf = pl.concat([sdf, last_df])
+
+            # date2列を追加
+            sdf = sdf.with_columns([
+                pl.col("date").shift(-1).alias("date2"),
+            ])
+
+            # 最終レコードを削除
+            sdf = sdf[:-1]
+
+            # accumulated_split_rate列のリストを作成
+            accumulated_split_rates = []
+            for d in sdf["date"]:
+                splite_rates = sdf.filter(pl.col("date")>=d)["split_rate"].to_list()
+                r = 1
+                for s in splite_rates:
+                    r *= s
+                accumulated_split_rates.append(r)
+
+            # accumulated_splate_rate列を追加
+            sdf = sdf.with_columns([
+                pl.Series(accumulated_split_rates).alias("accumulated_split_rate")
+            ])
+
+            # sdfを使ってpdfを分割修正する
+            pdflist = []
+            for r in sdf.rows():
+                d1 = r[1]
+                d2 = r[3]
+                ar = r[4]
+                p_pdf = pdf.filter(pl.col("date")<d1)\
+                    .filter(pl.col("date")>=d2)
+                p_pdf = p_pdf.with_columns([
+                    (pl.col("open") * ar).alias("open"),
+                    (pl.col("high") * ar).alias("high"),
+                    (pl.col("low") * ar).alias("low"),
+                    (pl.col("close") * ar).alias("close"),
+                    (pl.col("volume") / ar).alias("volume"),
+                    pl.lit(ar).alias("accumulated_split_rate")
+                ])
+                pdflist.append(p_pdf)
+
+            # pdflistを縦結合
+            pdf = pl.concat(pdflist)
+            pdf = pdf.select(reviced_pricelist_df_schema)
+            pdf = pdf.sort(by=["date"])
+
+            # reviced_pricelist_dfにpdfを縦結合
+            reviced_pricelist_df = pl.concat([reviced_pricelist_df, pdf])
+
+        return reviced_pricelist_df
     
     # items_dfにpl.DataFrame.columns = ["code", "start_date", "end_date"]のpl.DataFrameを与えると、
     # 各レコードのstart_dateからend_dateまでの株価騰落率の列を追加して返す
@@ -1255,6 +1517,28 @@ class KessanPl():
     def filter_code(self, code: int) -> None:
         self.df = self.df.filter(pl.col("code")==code)
 
+    def filter_by_codes(
+    self,
+    codes: list[int]
+    ) -> None:
+        '''
+        KessanPl.dfをcodesで指定した銘柄のみに絞る
+        '''
+        self.df = self.df.filter(pl.col("code").is_in(codes))
+    
+    def filter_by_settlement_type(
+        self, 
+        settlement_type: Literal["本", "予", "四"]
+    ) -> None:
+        '''
+        KessanPl.dfをsettlement_typeで指定した決算種別のみに絞る
+        '''
+        self.df = self.df.filter(pl.col("settlement_type")==settlement_type)
+
+    # 指定した列のnullを除外する
+    def filter_null(self, col: str) -> None:
+        self.df = self.df.filter(pl.col(col).is_not_null())
+
     # codeで指定した銘柄の年決算のリスト(履歴)を返す
     # valuation_dateを指定すると、指定日時点までの年決算を返す。
     # get_latest_forcast = Trueとした場合、valuation_date時点の最新の決算予想を返す
@@ -1372,6 +1656,44 @@ class KessanPl():
         self.df = self.df.select(self.df.columns[:-5])
 
         return df
+
+    # KessanPl.dfの、columnsで指定した列の集計関数の計算結果を1行のpl.DataFrameで返す。
+    # 使用する集約関数はagg_funcで指定する。
+    # returnするpl.DataFrameの列はcolumnsで指定した列のみ。
+    def get_aggregate_function_result(
+        self,
+        columns: list[str],
+        agg_func: Literal["sum", "mean", "max", "min", "first", "last", "median", "count", "std"],
+    ) -> pl.DataFrame:
+
+        df = self.df
+
+        if agg_func == "sum":
+            agg_func = pl.sum
+        elif agg_func == "mean":
+            agg_func = pl.mean
+        elif agg_func == "max":
+            agg_func = pl.max
+        elif agg_func == "min":
+            agg_func = pl.min
+        elif agg_func == "first":
+            agg_func = pl.first
+        elif agg_func == "last":
+            agg_func = pl.last
+        elif agg_func == "median":
+            agg_func = pl.median
+        elif agg_func == "count":
+            agg_func = pl.count
+        elif agg_func == "std":
+            agg_func = pl.std
+        else:
+            raise ValueError
+        
+        agg_dct = {}
+        for c in columns:
+            agg_dct[c] = df.select(agg_func(c)).to_series()
+
+        return pl.DataFrame(agg_dct)
 
     # valuation_dateが含まれる決算リストの一覧を抽出する
     # settlement_dateではなく、announcement_dateで抽出。
@@ -1521,6 +1843,8 @@ class KessanPl():
     # valuation_date時点で発表済最新の全銘柄の四半期決算リストを返す
     def get_latest_quater_settlements(self, valuation_date: date=date.today()) -> pl.DataFrame:
         df = self.df
+        #元の列の順番を保存しておく
+        ori_cols = df.columns
 
         df = df.filter(pl.col("settlement_type")=="四")\
             .filter(pl.col("announcement_date")<=valuation_date)
@@ -1538,7 +1862,9 @@ class KessanPl():
         # dfをdf1にleft joinして最新四半期決算情報のみ取得する
         df = df1.join(df, on=["code", "announcement_date"], how="left")
         
-        
+        # 元の列順に戻す
+        df = df.select(ori_cols)
+
         return df
     
     # valuation_date時点で発表済最新の全銘柄の本決算、四半期決算のリストを返す
@@ -1546,7 +1872,7 @@ class KessanPl():
         df1 = self.get_latest_quater_settlements(valuation_date)
         df2 = self.get_latest_yearly_settlements(valuation_date, settlement_type="本")
         df3 = self.get_latest_yearly_settlements(valuation_date, settlement_type="予")
-        
+
         df = pl.concat([df1, df2, df3])
 
         # sort
@@ -1562,6 +1888,8 @@ class KessanPl():
     # valuation_date時点で発表済最新の全銘柄の本決算、またはリストを返す
     def get_latest_yearly_settlements(self, valuation_date: date=date.today(), settlement_type: Literal["本", "予"]="本") -> pl.DataFrame:
         df = self.df
+        #元の列の順番を保存しておく
+        ori_cols = df.columns
 
         df = df.filter(pl.col("settlement_type")==settlement_type)\
             .filter(pl.col("announcement_date")<=valuation_date)
@@ -1579,8 +1907,65 @@ class KessanPl():
         # dfをdf1にleft joinして最新本決算情報のみ取得する
         df = df1.join(df, on=["code", "announcement_date"], how="left")
     
+        # 元の列順に戻す
+        df = df.select(ori_cols)
+
         return df
     
+    def get_next_and_last_yearly_settlement(
+        self, 
+        code: int,
+        valuation_date: date = date.today()
+    ):
+        """
+        指定した銘柄のvaluation_date時点で発表済の本決算情報と翌年度決算予想を返す
+        """
+        # valuation_dateにおける最新発表済決算
+        df1 = self.df
+        df1 = df1.filter(pl.col("code")==code)\
+            .filter(pl.col("settlement_type")=="本")\
+            .filter(pl.col("announcement_date")<=valuation_date)
+        df1 = df1[-1]
+
+        # valuation_dateにおける最新決算予想
+        latest_settlement_date = df1[0,"settlement_date"]
+        d2 = latest_settlement_date + relativedelta(years=1)
+        next_settlement_date = date(d2.year, d2.month, calendar.monthrange(d2.year, d2.month)[1])
+
+        df2 = self.df
+        df2 = df2.filter(pl.col("code")==code)\
+            .filter(pl.col("settlement_type")=="予")\
+            .filter(pl.col("settlement_date")==next_settlement_date)\
+            .filter(pl.col("announcement_date")<=valuation_date)
+        df2 = df2[-1]
+
+        # 連結
+        df = df2.vstack(df1)
+
+        return df
+    
+    def get_quater_settlement_history(
+        self, 
+        code: int, 
+        valuation_date: date=date.today(), 
+        limit: int=10
+    ) -> pl.DataFrame:
+        '''
+        特定銘柄のvaluation_date時点で発表済の四半期決算履歴を日付逆順でlimit個返す
+        '''
+
+        # filter
+        df = self.df
+        df = df.filter(pl.col("code")==code)\
+            .filter(pl.col('announcement_date')<=valuation_date)\
+            .filter(pl.col('settlement_type')=="四")
+        # sort
+        df = df.sort(by=["settlement_date"], descending=True)
+        df = df[:limit]
+
+        return df
+            
+
     # valuation_dateを含む全銘柄の四半期決算リストを返す
     def get_quater_settlements_including_valuation_date(self, valuation_date: date=date.today()) -> pl.DataFrame:
         df = self.df
@@ -2098,6 +2483,65 @@ class KessanPl():
 
         self.df = df
 
+
+    def with_columns_columns_ratio(
+        self,
+        col1: str,
+        col2: str,
+        new_col: str | None = None
+    ) -> None:
+        '''
+        KessanPl.dfにcol1/col2の比率列を追加する
+        new_colで列名を指定できる。指定しない場合は、"{col1}_to_{col2}_ratio"となる
+        '''
+        df = self.df
+
+        # validation
+        flg1 = col1 in df.columns
+        flg2 = col2 in df.columns
+        if not flg1:
+            try:
+                sys.exit(f"列{col1}は存在しません")
+            except SystemExit as e:
+                print("終了時メッセージ:", e)
+        if not flg2:
+            try:
+                sys.exit(f"列{col2}は存在しません")
+            except SystemExit as e:
+                print("終了時メッセージ:", e)
+
+        # 追加列名のセット
+        if new_col is None:
+            new_col = f'{col1}_to_{col2}_ratio'
+
+        df = df.with_columns(
+            (pl.col(col1) / pl.col(col2)).round(2).alias(new_col)
+        )
+
+        self.df = df
+        
+    def with_columns_company_name(self, last_column: bool=False) -> None:
+        '''
+        KessanPl.dfにname列(会社名)を追加する
+        last_column=Trueにすると、最後の列にする
+        last_column=Falseにすると、codeの次の列(2列目)に追加する
+        '''
+
+        df = self.df
+        MPL = MeigaralistPl()
+        df2 = MPL.df.select(["code", "name"])
+        df3 = result = df2.join(df, on=["code"], how="right")
+
+        # どの位置にname列を追加するか
+        if last_column:
+            columns = df3.columns[1:] + [df3.columns[0]]
+        else:
+            columns = [df3.columns[1]] + [df3.columns[0]] + df3.columns[2:]
+
+        df3 = df3.select(columns)
+
+        self.df = df3
+
     # 前年同期と比較して、差分利益率：(今年度利益率-昨年度利益率)/(今年度売上高-昨年度売上高)
     # を営業利益～純利益の各差分利益について計算して列を追加する。
     # 売上高に対しては、売上高伸び率列を追加する。
@@ -2296,8 +2740,8 @@ class KessanPl():
     # KessanPl.dfのsettlement_type="予"は除外される
     def with_columns_growth_rate(self):
         ori_cols = self.df.columns
-        if not "ly_sales" in ori_cols:
-            self.with_columns_lastyear_settlement()
+
+        self.with_columns_lastyear_settlement()
             
         df = self.df
         cols = [
@@ -2311,6 +2755,8 @@ class KessanPl():
         for c in cols:
             lyc = f'ly_{c}'
             grc = f'gr_{c}'
+            if grc in df.columns:
+                continue
             df = df.with_columns([
                 (pl.lit(100) * (pl.col(c) - pl.col(lyc)) / pl.col(lyc)).round(2).alias(grc)
             ])
@@ -2320,14 +2766,110 @@ class KessanPl():
             
         self.df = df
     
+    # 本決算は、「昨年度」決算の、四半期決算は「前四半期」決算の
+    # sales ～final_profitの成長率列をlsgr_sales～lsgr_final_profitの列名でself.dfに追加する
+    # self.dfのsettlement_type == "予"のレコードはフィルタされる。
+    def with_columns_lastsettlement_growth_rate(self) -> None:
+        ori_cols = self.df.columns
+        self.with_columns_growth_rate()
+
+        # 追加列
+        target_cols = [
+            "sales",
+            "operating_income",
+            "ordinary_profit",
+            "final_profit"
+        ]
+
+        # 本決算
+        df0 = self.df.filter(pl.col("settlement_type") == "本")
+        added_cols = []
+
+        # gr_code列を追加
+        df0 = df0.with_columns([
+            pl.col("code").shift(1).alias("gr_code")
+        ])
+
+        for c in target_cols:
+            gr_col = f'gr_{c}'
+            added_col = f'lsgr_{c}'
+            if added_col in ori_cols:
+                print(f'列{added_col}はすでに存在する -> 追加をスキップ')
+                continue
+            df0 = df0.with_columns([
+                pl.col(gr_col).shift(1).alias(added_col)
+            ])
+            added_cols.append(added_col)
+        
+        # 段ずれレコードのfilter
+        df0 = df0.filter(pl.col("code")==pl.col("gr_code"))
+        
+        # 列のselect
+        df0 = df0.select(ori_cols + added_cols)
+
+        
+        # 四半期決算
+        df1 = self.df.filter(pl.col("settlement_type") == "四")
+        added_cols = []
+
+        # gr_code列を追加
+        df1 = df1.with_columns([
+            pl.col("code").shift(1).alias("gr_code")
+        ])
+
+        for c in target_cols:
+            gr_col = f'gr_{c}'
+            added_col = f'lsgr_{c}'
+            if added_col in ori_cols:
+                print(f'列{added_col}はすでに存在する -> 追加をスキップ')
+                continue
+            df1 = df1.with_columns([
+                pl.col(gr_col).shift(1).alias(added_col)
+            ])
+            added_cols.append(added_col)
+        
+        # 段ずれレコードのfilter
+        df1 = df1.filter(pl.col("code")==pl.col("gr_code"))
+        
+        # 列のselect
+        df1 = df1.select(ori_cols + added_cols)
+
+        # 本決算と四半期決算のconcat　&　self.dfのsort
+        df = pl.concat([df0, df1])
+        df = df.sort(by=["code", "settlement_date", "settlement_type"])
+
+        self.df = df
+
+            
+
+
+    
     # 前年同期の決算情報列を追加する。
     # KessanPl.dfのsettlement_type="予"は除外される
     def with_columns_lastyear_settlement(self) -> None:
         ori_cols = self.df.columns        
+
+        added_cols0 = [
+            "ly_settlement_date",
+            "ly_announcement_date",
+            "ly_sales",
+            "ly_operating_income",
+            "ly_ordinary_profit",
+            "ly_final_profit"
+        ]
+
+        # ly_*列がすでにある場合は、処理しない
+        for c in added_cols0:
+            if c in ori_cols:
+                print(f'列{c}はすでに存在します -> skip with_columns_lastyear_settlement')
+                return
+
         # 本決算
         df1 = self.df
         df1 = df1.filter(pl.col("settlement_type") == "本")
         for c in ori_cols:
+            if f'ly_{c}' in ori_cols:
+                continue
             df1 = df1.with_columns([
                 pl.col(c).shift(1).alias(f'ly_{c}')
             ])
@@ -2337,6 +2879,8 @@ class KessanPl():
         df2 = self.df
         df2 = df2.filter(pl.col("settlement_type") == "四")
         for c in ori_cols:
+            if f'ly_{c}' in ori_cols:
+                continue
             df2 = df2.with_columns([
                 pl.col(c).shift(4).alias(f'ly_{c}')
             ])
@@ -2346,14 +2890,12 @@ class KessanPl():
         
         # df1とdf2をconcat
         df = pl.concat([df1, df2])
-        added_cols = [
-            "ly_settlement_date",
-            "ly_announcement_date",
-            "ly_sales",
-            "ly_operating_income",
-            "ly_ordinary_profit",
-            "ly_final_profit"
-        ]
+
+        added_cols = []
+        for c in added_cols0:
+            if not c in ori_cols:
+                added_cols.append(c)
+
         df = df.select(ori_cols + added_cols)
         df = df.sort(by=["code", "settlement_date", "settlement_type"])
         
@@ -2509,10 +3051,34 @@ class KessanPl():
         
         self.df = df
 
-        
-        
-        
     
+    def with_columns_profit_rate(self) -> None:
+        '''
+        KessanPl.dfに営業利益率、経常利益率、純利益率列を追加する
+        追加される列名は、pr_{colname}
+        例：pr_operating_income
+        すでに追加されていたら、スキップ
+        '''
+        df = self.df
+
+        # すでに追加していたら、スキップ
+        if "pr_operating_income" in df.columns:
+            print("利益率列はすでに追加済")
+            return
+
+        profits = [
+            "operating_income",
+            "ordinary_profit",
+            "final_profit"
+        ]
+
+        for p in profits:
+            df = df.with_columns(
+                (pl.lit(100) * pl.col(p) / pl.col("sales")).round(1).alias(f'pr_{p}')
+            )
+
+        self.df = df        
+
     # 作りかけ
     def with_columns_settlements_progress_rate(self) -> None:
         # KessanPl.dfに年度決算日列を追加
@@ -2528,6 +3094,54 @@ class KessanPl():
 
         # レコードの決算発表時に発表済のレコードのみ抽出
         df = df.filter(pl.col("announcement_date")>pl.col("announcement_date_right"))
+
+        self.df = df
+    
+    # 決算発表日当日と決算発表日翌営業日始値の騰落率列を追加する
+    # 決算発表日当日を、"open"からはじめるか"close"からはじめるか、bigining_pointで指定する
+    def with_columns_updown_rate_on_announcement_date(self,
+        bigining_point: Literal["open", "close"] = "open",
+    ) -> None:
+        new_col = "updown_rate_on_sett"
+        # 追加済ならば処理をスキップ
+        if new_col in self.df.columns:
+            return
+
+        
+        # reviced_pricelist読込
+        rpl_df = PricelistPl().df
+
+        # reviced_pricelist 翌営業日始値列を追加
+        rpl_df = rpl_df.with_columns([
+            pl.col("code").shift(-1).alias("scode"),
+            pl.col("open").shift(-1).alias("eprice")
+        ])
+        rpl_df = rpl_df.filter(pl.col("code")==pl.col("scode"))
+
+        # 計算とjoinに必要な列をselect
+        rpl_df = rpl_df.select([
+            "code",
+            "date",
+            bigining_point,
+            "eprice"
+        ])
+
+        # join
+        df = self.df
+        df = df.with_columns([
+            pl.col("announcement_date").alias("date")
+        ])
+        df = df.join(rpl_df, on=["code", "date"], how="left")
+
+        # updown_rateを計算
+        df = df.with_columns([
+            (pl.lit(100) * (pl.col("eprice") - pl.col("open")) / pl.col("open")).round(2).alias(new_col)
+        ])
+
+        # 必要な列のみ抽出
+        df = df.select(
+            self.df.columns + [new_col]
+        )
 
         self.df = df
     
@@ -2648,12 +3262,226 @@ class MeigaralistPl():
     def get_name(self, code: int) -> str:
         return self.df.filter(pl.col("code")==code).select(["name"]).to_series().item()
 
-# shikiho.parquetを読みこんでデータの抽出、加工、分析などを行う
-class ShikihoPl():
+class PortfolioManager():
     def __init__(self, df: Union[pl.DataFrame, None]=None):
         # dfの読み込み
         if df is None:
-            fp = str(DATA_DIR/"shikiho.parquet")
+            fp = str(DATA_DIR/"base_portfolio.parquet")
+            df = pl.read_parquet(fp)
+        
+        self.df = df
+
+    def filter_portfolio_as_of_specific_date(
+        self,
+        specific_date: date = date.today(),
+        inplace: bool = False
+    ) -> pl.DataFrame | None:        
+        '''
+        PortfolioManager.dfから、指定日における最新日のデータを抽出する。
+        (最も古いデータは2026年1月1日)
+        inplace = Falseの場合は、抽出結果をpl.DataFrameで返す。
+        inplace = Trueの場合は、抽出結果をPortfolioManager.dfにセットしてNoneを返す。
+        '''
+        df = self.df
+
+        df = df.filter(
+            pl.col("date") <= specific_date
+        )
+        latest_date = df["date"].max()
+
+        df = df.filter(
+            pl.col("date") == latest_date
+        )
+
+        if inplace:
+            self.df = df
+            return
+        else:
+            return df
+
+    def get_individual_stocks(
+        self,
+        specific_date: date = date.today(),
+        columns_selected: list[str] = [],
+        unique: bool = True
+    ) -> pl.DataFrame:
+        '''
+        specific_dateにおける最新ポートフォリオから、個別株のリストを取得する。
+        ETFは除外。
+        columns_selectedを指定すると、返すpl.DataFrameの列を選別(select)できる。指定しない場合は列の選別はしない。
+        uniqueを指定すると、返すpl.DataFrameにレコード重複があった場合、重複を排除する。
+        '''
+        df = self.df
+
+        # 指定日の最新portfolioを抽出
+        df = self.filter_portfolio_as_of_specific_date(specific_date)
+
+        # 個別株のみ選別
+        df = df.filter(
+            pl.col("instrument_type") == "個別株"
+        )
+
+        # 列の選別
+        if len(columns_selected) != 0:
+            df = df[columns_selected]
+
+        # recordの重複排除
+        if unique:
+            df = df.unique()
+
+        # ticker_codeでsort
+        df = df.sort(["ticker_code"])
+    
+        return df
+
+    def get_individual_stocks_info(
+        self,
+        specific_date: date = date.today(),
+        output_performance: bool = False
+    ) -> pl.DataFrame:
+        '''
+        specific_dateで指定した最新portfolioに含まれる各個別株のファンダメンタルズや
+        最新決算における業績成長率などのデータを銘柄ごとにpl.DataFrameにまとめて返す。
+        output_porformance = Trueにすると、 '買値','株価','数量', '損益', '口座'の各列を出力する。
+        '''    
+        # base
+        if output_performance:
+            cols = [
+                "date", 
+                "ticker_code",
+                "銘柄名",
+                'purchase_price',
+                'close_price',
+                'quantity'
+            ]
+            new_cols = [
+                "date", 
+                "code",
+                "銘柄名",
+                'purchase_price',
+                'close_price',
+                'quantity',
+            ]
+        else:
+            cols = ["date", "ticker_code", "銘柄名"]
+            new_cols = ["date", "code", "銘柄名"]
+
+        df = self.get_individual_stocks(specific_date, cols)
+
+        # get_individual_stocksメソッドはレコードの重複排除しかしないので、同一銘柄のperformanceをcodeで集約する。
+        if output_performance:
+            df = df.with_columns([
+                pl.col('purchase_price').cast(pl.Float64).alias('purchase_price'),
+                pl.col('close_price').cast(pl.Float64).alias('close_price'),
+                pl.col('quantity').cast(pl.Int64).alias('quantity')
+            ])
+
+            df = df.group_by(["ticker_code"]).agg([
+                pl.col('date').last(), 
+                pl.col('銘柄名').last(), 
+                pl.col('purchase_price').mean().round(1), 
+                pl.col('close_price').mean().round(1), 
+                pl.col('quantity').sum()
+            ])
+
+        # key列となるのでticker_codeをcodeに変更
+        df = df.with_columns([
+            pl.col("ticker_code").alias("code")
+        ]).select(new_cols)
+        # 後で使うのでオリジナルとして取得しておく
+        original_df = df
+
+        # finance_quateのデータ
+        # code, 'expected_PER', expected_dividend_yield
+        FQ = FinancequotePl()
+        cols = ['code', 'expected_PER', 'expected_dividend_yield']
+        df1 = FQ.filter_finance_quotes_by_date(specific_date)
+        df1 = df1[cols]
+        # code列を文字列に変更
+        df1 = df1.with_columns(
+            pl.col("code").cast(pl.Utf8)
+        )
+        df = df.join(df1, on=["code"], how="left")
+        # 列名変更
+        df = df.with_columns([
+            pl.col("銘柄名").alias("name"),
+            pl.col("expected_PER").alias("fq-PER"),
+            pl.col("expected_dividend_yield").alias("fq-配当率")
+        ]).select(["date","code","name","fq-PER","fq-配当率"])
+
+        # kessanデータ
+        # 四半期対前年同期比売上高成長率(q-sgr)と四半期経常利益(q-op)と経常利益成長率列(q-pgr)を追加する
+        # dfをcode変換してK.dfのレコードを保有銘柄だけに絞れるようにする
+        holdings = []
+        for c in df["code"]:
+            #print(c)
+            try:
+                holdings.append(int(c))
+            except:
+                continue
+        K = KessanPl()
+        K.filter_by_codes(holdings)
+        K.filter_by_settlement_type("四")
+        K.with_columns_growth_rate()
+        # specific_dateにおける最新四半期決算のみを抽出
+        df1 = K.df
+        df1 = df1.group_by(["code"]).agg([
+            pl.col("settlement_date").last(),
+            pl.col("gr_sales").last(),
+            pl.col("ordinary_profit").last(),
+            pl.col("gr_ordinary_profit").last()
+        ])
+        # codeの型を変換して列名を変更
+        df1 = df1.with_columns([
+            pl.col("code").cast(pl.Utf8).alias("code"),
+            pl.col("settlement_date").alias("q-sett"),
+            pl.col("gr_sales").alias("q-sgr"),
+            pl.col("ordinary_profit").alias("q-op"),
+            pl.col("gr_ordinary_profit").alias("q-pgr"),
+        ]).select(["code", "q-sett", "q-sgr", "q-op", "q-pgr"])
+        # join to df
+        df = df.join(df1, on=["code"], how="left")
+
+        # performance情報を追加する
+        if not output_performance:
+            return df
+
+        df2 = original_df
+        # 列の型を見やすく変更する
+        df2 = df2.with_columns([
+            pl.col("purchase_price").cast(pl.Float64),
+            pl.col("close_price").cast(pl.Float64),
+            pl.col("quantity").cast(pl.Int64)
+        ])
+
+        # 損益列を追加し、出力用に列名を変更する
+        # '買値','現在値','数量', '保有高', '損益', '口座'
+        df2 = df2.with_columns([
+            pl.col("purchase_price").alias("買値"),
+            pl.col("close_price").alias("現在値"),
+            pl.col("quantity").alias("数量"),
+            (pl.col("close_price") * pl.col("quantity")).cast(pl.Int64).alias('保有高'),
+            ((pl.col("close_price")-pl.col("purchase_price"))* pl.col("quantity")).cast(pl.Int64).alias('損益')
+        ]).select([
+            pl.col("code"),
+            pl.col('買値'),
+            pl.col('現在値'),
+            pl.col('数量'), 
+            pl.col('保有高'), 
+            pl.col('損益')
+        ])
+        # join
+        df = df.join(df2, on=["code"], how="left")
+        df = df.sort("code")
+
+        return df
+
+# shikiho.parquetを読みこんでデータの抽出、加工、分析などを行う
+class ShikihoOnlinePl():
+    def __init__(self, df: Union[pl.DataFrame, None]=None):
+        # dfの読み込み
+        if df is None:
+            fp = str(DATA_DIR/"shikiho_online.parquet")
             df = pl.read_parquet(fp)
         
         # 列名を変更
@@ -2733,8 +3561,51 @@ class ShikihoPl():
         print(f'{map_dct["title2"]}')
         print(f'  {map_dct["comment2"]}')
         
+# どのようなpl.DataFrameでも利用可能なツールメソッドを集めたクラス
+class CommonPl():
+    def __init__(self, df: pl.DataFrame):
+        self.df = df
+            
+    # KessanPl.dfの、columnsで指定した列の集計関数の計算結果を1行のpl.DataFrameで返す。
+    # 使用する集約関数はagg_funcで指定する。
+    # returnするpl.DataFrameの列はcolumnsで指定した列のみ。
+    def get_aggregate_function_result(
+        self,
+        columns: list[str],
+        agg_func: Literal["sum", "mean", "max", "min", "first", "last", "median", "count", "std"],
+        rouond: int = 2
+    ) -> pl.DataFrame:
+
+        df = self.df
+
+        if agg_func == "sum":
+            agg_func = pl.sum
+        elif agg_func == "mean":
+            agg_func = pl.mean
+        elif agg_func == "max":
+            agg_func = pl.max
+        elif agg_func == "min":
+            agg_func = pl.min
+        elif agg_func == "first":
+            agg_func = pl.first
+        elif agg_func == "last":
+            agg_func = pl.last
+        elif agg_func == "median":
+            agg_func = pl.median
+        elif agg_func == "count":
+            agg_func = pl.count
+        elif agg_func == "std":
+            agg_func = pl.std
+        else:
+            raise ValueError
         
-        
+        agg_dct = {}
+        for c in columns:
+            agg_dct[c] = df.select(agg_func(c)).to_series().round(rouond)
+
+        return pl.DataFrame(agg_dct)
+
+
 # 日経平均などのIndexのローソク足チャートを描画する
 class IndexPricelistFig():
     def __init__(self,
@@ -2871,6 +3742,7 @@ class KessanFig():
         # 売上高棒グラフのグラフオブジェクトを生成
         if settlement_type == "通期":
             self.fig = self.yearly_settlement_trend_barchart()
+           
         elif settlement_type == "四半期":
             self.fig = self.quaterly_settlement_trend_barchart()
     
@@ -2952,7 +3824,7 @@ class KessanFig():
         # self.end_settlement_dateにおける最新forcastを追加
         KPL = KessanPl(self.original_df)
         fdf = KPL.get_latest_yearly_settlements(
-                reference_date=self.end_settlement_date,
+                valuation_date=self.end_settlement_date,
                 settlement_type="予"
         )
         fdf = fdf.filter(pl.col("code")==self.code)
@@ -3066,7 +3938,7 @@ class PricelistFig():
         self.tickangle = 45
         
         if type(pricelist_df) != pl.DataFrame:
-            fp = DATA_DIR / "raw_pricelist.parquet"
+            fp = DATA_DIR / "reviced_pricelist.parquet"
             pricelist_df = read_data(fp)
         PPL =  PricelistPl(pricelist_df)
         if type(meigaralist_df) != pl.DataFrame:
@@ -3205,8 +4077,224 @@ class PricelistFig():
         )
         
         self.fig = fig
+
+#
+# 散布図
+#
+class ScatterPlotFig():
+    def __init__(
+        self, 
+        df: Union[pl.DataFrame, pd.DataFrame],
+        x_col: str,
+        y_col: str,
+        title = ""
+    ):
         
+        # pl.DataFrameは型変換してself.dfをセット
+        if type(df) == pd.DataFrame:
+            df = pl.from_pandas()
+        self.df = df
+
+        # x列とy列のセット
+        self.x_col = x_col
+        self.y_col = y_col
         
+        # titleのセット
+        if title == "":
+            title = f'x: {x_col} / y: {y_col}'
+        self.title = title
+        
+    def get_fig(self):
+        df = self.df
+        pddf = df.to_pandas()
+
+        # figインスタンスの生成
+        if "category" not in df.columns:
+            return px.scatter(
+                pddf, 
+                x = self.x_col, 
+                y = self.y_col, 
+                title = self.title
+            )
+        else:
+            return px.scatter(
+                pddf, 
+                x = self.x_col, 
+                y = self.y_col,
+                color = "category", 
+                title = self.title
+            )
+    
+    # 散布図を見やすくするためのはずれ異常値処理につかう。
+    # rangeを指定すると、小さいはずれ値は指定したmin_x, 大きい外れ値はmax_xに書き換えられる
+    def set_x_range(
+        self,
+        min_x: Union[int, float, None] = None,
+        max_x: Union[int, float, None] = None
+    ) -> None:
+        df = self.df
+
+        if min_x is None:
+            min_x = df[self.x_col].min()
+        if max_x is None:
+            max_x = df[self.x_col].max()
+
+        # 小さい方をカット
+        df = df.with_columns([
+            pl.when(pl.col(self.x_col) < min_x)
+            .then(pl.lit(min_x))
+            .otherwise(pl.col(self.x_col))
+            .alias(self.x_col)
+        ])
+
+        # 大きい方をカット
+        df = df.with_columns([
+            pl.when(pl.col(self.x_col) > max_x)
+            .then(pl.lit(max_x))
+            .otherwise(pl.col(self.x_col))
+            .alias(self.x_col)
+        ])
+
+        self.df = df
+    
+    # 散布図を見やすくするためのはずれ異常値処理につかう。
+    # rangeを指定すると、小さいはずれ値は指定したmin_y, 大きい外れ値はmax_yに書き換えられる
+    def set_y_range(
+        self,
+        min_y: Union[int, float, None] = None,
+        max_y: Union[int, float, None] = None
+    ) -> None:
+        df = self.df
+
+        if min_y is None:
+            min_y = df[self.y_col].min()
+        if max_y is None:
+            max_y = df[self.y_col].max()
+
+        # 小さい方をカット
+        df = df.with_columns([
+            pl.when(pl.col(self.y_col) < min_y)
+            .then(pl.lit(min_y))
+            .otherwise(pl.col(self.y_col))
+            .alias(self.y_col)
+        ])
+
+        # 大きい方をカット
+        df = df.with_columns([
+            pl.when(pl.col(self.y_col) > max_y)
+            .then(pl.lit(max_y))
+            .otherwise(pl.col(self.y_col))
+            .alias(self.y_col)
+        ])
+    
+    # y列の閾値で2つのグループに分類し、category列を追加してプロットの色をカテゴリごとに変える
+    # "category"列がある場合は、処理しない。
+    def with_columns_category(
+        self,
+        y_min: Union[int, float, None] = None,
+        y_max: Union[int, float, None] = None,
+    ) -> None:
+    
+        df = self.df
+        col = "category"
+        if col in df.columns:
+            print(f'列{col}がすでにあります。新たにcategory列で分類したい場合はScatterPlotFig.dfの列{col}を削除してください。')
+            return
+        if (y_min is None) and (y_max is None):
+            df = df.with_columns([
+                pl.lit(1)
+            ])
+        elif (y_min is None) and (y_max is not None):
+            df = df.with_columns([
+                pl.when(pl.col(self.y_col) <= y_max)
+                .then(pl.lit(2))
+                .otherwise(pl.lit(1))
+                .alias(col)
+            ])
+        elif (y_min is not None) and (y_max is None):
+            df = df.with_columns([
+                pl.when(pl.col(self.y_col) >= y_min)
+                .then(pl.lit(2))
+                .otherwise(pl.lit(1))
+                .alias(col)
+            ])
+        else:
+            df = df.with_columns([
+                pl.when(pl.col(self.y_col) < y_min)
+                .then(pl.lit(1))
+                .when(pl.col(self.y_col) > y_max)
+                .then(pl.lit(3))
+                .otherwise(pl.lit(2))
+                .alias(col)
+            ])
+        
+        self.df = df
+
+        
+# pl.Seriesの統計量を取得
+class CalcStatistics():
+    def __init__(
+        self, 
+        s: pl.Series
+    ):
+        self.s = s
+        self.stats_dct = {
+            "データ総数": s.shape[0],
+            "平均": s.mean()
+        }
+    
+    # 閾値th以上の標本数、th未満の標本数のkey: valueをstats_dctに追加
+    def add_threshold_items(
+        self, 
+        th: Union[int, float],
+        key_ormore = "",
+        key_below = ""
+    ) -> None:
+        s = self.s
+
+        # th以上の標本数
+        s = s.filter(s >= th)
+        num_ormore = s.shape[0]
+        if key_ormore == "":
+            key_ormore = f'{th}以上の標本数'
+        self.stats_dct[key_ormore] = num_ormore
+
+        # th未満の標本数
+        s = s.filter(s >= th)
+        num_below = s.shape[0]
+        if key_ormore == "":
+            key_below = f'{th}未満の標本数'
+        self.stats_dct[key_below] = num_below
+    
+    def add_win_rate(
+        self,
+        th: Union[int, float] = 0,
+        key: str = "勝率",
+        op: Literal[">", ">="] = ">"
+    ) -> None:
+        s = self.s
+        total = self.stats_dct["データ総数"]
+        if op == ">":
+            s = s.filter(s > th)
+        else:
+            s = s.filter(s >= th)
+        
+        win_rate = round(100 * (s.shape[0] / total), 1)
+        
+        self.stats_dct[key] = f'{str(win_rate)}%'
+    
+    def output_stats(self) -> None:
+        stats_dct = self.stats_dct
+        max_key_length = max(len(key) for key in stats_dct.keys())
+
+        key_length = max_key_length * 2
+        for key, value in stats_dct.items():
+            print(f"{key.ljust(key_length)} : {value}")
+
+
+
+    
+
         
     
         

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wequant"    # PyPIで配布するときの名前（プロジェクト専用でpypiには登録しないため不要だが、nameは必須）
+version = "0.1.0"
+description = "wequant stock market analysis"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [     # cli.pyでimportされているモジュールがインストールされているかチェック。
+  "pandas>=2.2.3"           
+]
+
+[project.scripts]
+wq = "wequant.cli:app"  # ← これで `pa` コマンドができる
+
+[tool.setuptools.packages.find]
+include = ["wequant"] 

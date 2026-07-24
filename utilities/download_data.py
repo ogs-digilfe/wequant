@@ -22,15 +22,23 @@ DOWNLOADABLE_FILES = [
     "nh225.parquet",
     "raw_pricelist.parquet",
     "reviced_pricelist.parquet",
-    "shikiho.parquet"
+    "shikiho_online.parquet",
+    "sp500.parquet",
+    "base_portfolio.parquet"
 ]
 
 # fileのダウンロード
 client = Client()
 
-for f in DOWNLOADABLE_FILES:
-    client.download(f)
+def download_data():
+    """最新データをdeliverサーバからdownloadする"""
+    print("Downloading latest data from deliver server...")
+    for f in DOWNLOADABLE_FILES:
+        client.download(f)
 
 # fp = DATA_DIR/f
 # client.upload(fp)
+
+if __name__ == "__main__":
+    download_data()
 

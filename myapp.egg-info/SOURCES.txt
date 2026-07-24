@@ -1,0 +1,14 @@
+pyproject.toml
+wequant/dev/FinanceQuotePl.py
+wequant/dev/KessanPl.py
+wequant/dev/PricelistPl.py
+wequant/lib/lib_api.py
+wequant/lib/lib_dataprocess.py
+wequant/myapp.egg-info/PKG-INFO
+wequant/myapp.egg-info/SOURCES.txt
+wequant/myapp.egg-info/dependency_links.txt
+wequant/myapp.egg-info/entry_points.txt
+wequant/myapp.egg-info/top_level.txt
+wequant/utilities/create_and_save_reviced_pricelist_parquet.py
+wequant/utilities/download_data.py
+wequant/utilities/setup.py
