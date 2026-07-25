@@ -1,5 +1,8 @@
 # wequant
 
+株式市場分析ツールです。Pythonパッケージは`src/wequant/`に配置し、
+コマンドラインインターフェースとして`wq`を提供します。
+
 ## 開発環境のセットアップ
 
 Python環境と依存関係は`uv`で管理します。Python 3.12と`uv`を利用できる
@@ -33,12 +36,27 @@ WEQUANT_DELIVER_PASSWORD=replace-with-your-password
 その値が`.env`より優先されます。秘密値をログ、Issue、チャット、
 Notebook出力へ記載しないでください。
 
+## CLI
+
+利用できるコマンドは、リポジトリルートから次のコマンドで確認できます。
+
+```bash
+uv run wq --help
+```
+
+アプリケーション名と説明は、それぞれ次のコマンドで表示できます。
+
+```bash
+uv run wq get-app-name
+uv run wq describe
+```
+
 ## Parquetファイルのダウンロード
 
 リポジトリルートから次のコマンドを実行します。
 
 ```bash
-uv run python utilities/download_data.py
+uv run wq dl-pq
 ```
 
 Deliver APIから取得したParquetファイルは、Git管理対象外の`data/`へ

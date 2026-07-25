@@ -17,17 +17,23 @@
 
 ```text
 wequant/
-├── __init__.py
-├── cli.py
-├── lib/
-│   ├── config.py
-│   ├── lib_api.py
-│   └── lib_dataprocess.py
+├── src/
+│   └── wequant/
+│       ├── __init__.py
+│       ├── api.py
+│       ├── cli.py
+│       ├── config.py
+│       ├── data_processing.py
+│       └── commands/
+│           ├── __init__.py
+│           └── download_data.py
 ├── utilities/
-│   ├── create_and_save_reviced_pricelist_parquet.py
-│   └── download_data.py
+│   └── create_and_save_reviced_pricelist_parquet.py
 ├── tests/
-│   └── test_config.py
+│   ├── test_api.py
+│   ├── test_cli.py
+│   ├── test_config.py
+│   └── test_download_data.py
 ├── notebooks/
 ├── my_notebooks/
 ├── data/                 # Git管理対象外
@@ -41,8 +47,8 @@ wequant/
 └── .gitignore
 ```
 
-現時点では`src/`レイアウトではなく、Pythonコードがリポジトリ直下、`lib/`、
-`utilities/`に分散している。
+Pythonパッケージは`src/wequant/`に配置する。パッケージ外の補助スクリプトは
+`utilities/`に配置する。
 
 ## 開発環境
 
@@ -59,15 +65,15 @@ wequant/
 Parquetファイルのダウンロードは、リポジトリルートから次のコマンドで実行する。
 
 ```bash
-uv run python utilities/download_data.py
+uv run wq dl-pq
 ```
 
 この処理は外部通信を行い、`data/`内の同名Parquetファイルを上書きする。
 ユーザーによる実環境でのダウンロード成功を確認済みである。
 
-`cli.py`はTyperアプリケーションを定義しているが、直接実行用の`app()`呼び出しがなく、
-`pyproject.toml`のエントリーポイントとソース配置にも不整合の可能性がある。
-CLIの実行方法は、`src`レイアウトへの移行時に修正・確定する。
+CLIは`src/wequant/cli.py`でTyperアプリケーションとして定義し、
+`pyproject.toml`の`wq`エントリーポイントから実行する。コマンド一覧は
+`uv run wq --help`で確認する。
 
 ## ローカル設定
 
@@ -83,7 +89,7 @@ CLIの実行方法は、`src`レイアウトへの移行時に修正・確定す
 - 認証情報、アクセストークン、パスワード、Cookieなどの秘密値を読み取ったり、表示・ログ出力・コミットしたりしない。
 - `.env`や認証情報ファイルを追加する場合は、先に`.gitignore`の対象であることを確認する。
 - `data/`内のParquetファイルはローカルデータとして扱い、明示的な依頼なしに更新・削除・コミットしない。
-- `utilities/download_data.py`の実行は、外部通信とローカルデータの上書きを伴うため自動実行しない。
+- `uv run wq dl-pq`の実行は、外部通信とローカルデータの上書きを伴うため自動実行しない。
 - 外部通信を伴う確認は、接続先、対象操作、秘密情報の扱いを確認し、ユーザーの了承を得てから実行する。
 - Notebookを一括実行しない。実行が必要な場合は、対象Notebookと副作用を先に確認する。
 
@@ -105,7 +111,8 @@ CLIの実行方法は、`src`レイアウトへの移行時に修正・確定す
 uv run python -m unittest discover -s tests -v
 ```
 
-- uv環境で上記の単体テスト2件が成功することを確認済みである。
+- uv環境で上記の単体テスト8件が成功することを確認済みである。
+- CLI、ダウンロード処理、Deliver API認証のテストでは、外部通信部分をモックする。
 - 変更箇所に対して、外部通信を行わない最小限の構文確認・静的確認を優先する。
 - 新しいテストは`tests/`に追加し、ネットワークと実データに依存しないようにする。
 - 外部サービスはモックまたは依存性注入で置き換える。
@@ -117,9 +124,9 @@ uv run python -m unittest discover -s tests -v
 1. [x] `AGENTS.md`を整備する。
 2. [x] `.env`と環境変数を使用する安全な設定方式へ統一する。
 3. [x] `uv`でPython環境と依存関係を再現可能にする。
-4. [ ] Pythonパッケージを`src`レイアウトへ移行する。
-5. [ ] 外部通信なしで動く自動テストを拡充する。
-6. [ ] 実際の構成と手順に合わせて`README.md`と本ファイルを継続的に更新する。
+4. [x] Pythonパッケージを`src`レイアウトへ移行する。
+5. [x] 外部通信なしで動く自動テストを拡充する。
+6. [x] 実際の構成と手順に合わせて`README.md`と本ファイルを更新する。
 
 計画の各段階は、原則として独立して確認・コミットできる状態にする。
 

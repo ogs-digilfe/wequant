@@ -1,14 +1,9 @@
 import os
 from pathlib import Path
-import sys
 from unittest import TestCase
 from unittest.mock import patch
 
-
-LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
-sys.path.insert(0, str(LIB_DIR))
-
-from config import ConfigurationError, load_deliver_settings
+from wequant.config import ConfigurationError, load_deliver_settings
 
 
 class LoadDeliverSettingsTests(TestCase):

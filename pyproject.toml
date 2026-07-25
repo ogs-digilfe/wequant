@@ -23,5 +23,9 @@ dependencies = [
 [project.scripts]
 wq = "wequant.cli:app"  # ← これで `pa` コマンドができる
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
 [tool.setuptools.packages.find]
-include = ["wequant"]
+where = ["src"]
+include = ["wequant*"]
