@@ -1,11 +1,47 @@
-**/__pycache__/
-**/.ipynb_checkpoints/
-__pycache__
-*.pyc
-**/.ipynb_checkpoints/
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.sample
+credentials/
+settings_wequant/
 
-**/data/
-**/tmp_data/
-**/settings/
-**/dev/
-**/iframe_figures/
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Python packaging and test artifacts
+*.egg-info/
+build/
+dist/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editors and local workspace metadata
+.idea/
+.vscode/
+.obsidian/
+*.swp
+*~
+
+# Jupyter-generated files
+.ipynb_checkpoints/
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+
+# Local datasets and generated application files
+data/
+tmp_data/
+settings/
+iframe_figures/

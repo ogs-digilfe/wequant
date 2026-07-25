@@ -8,12 +8,24 @@ version = "0.1.0"
 description = "wequant stock market analysis"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = [     # cli.pyでimportされているモジュールがインストールされているかチェック。
-  "pandas>=2.2.3"           
+dependencies = [
+  "jupyterlab",
+  "pandas>=2.2.3",
+  "plotly",
+  "polars-lts-cpu",
+  "pyarrow",
+  "pydantic",
+  "python-dotenv",
+  "requests",
+  "typer",
 ]
 
 [project.scripts]
 wq = "wequant.cli:app"  # ← これで `pa` コマンドができる
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
 [tool.setuptools.packages.find]
-include = ["wequant"] 
+where = ["src"]
+include = ["wequant*"]

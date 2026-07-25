@@ -1,15 +1,10 @@
-# Pathの設定
 from pathlib import Path
-import sys
 
-CURRENT_DIR = Path(__file__).parent
+from wequant.data_processing import PricelistPl, read_data
+
+
+CURRENT_DIR = Path(__file__).resolve().parent
 PJ_DIR = CURRENT_DIR.parent
-LIB_DIR = PJ_DIR / "lib"
-
-sys.path.append(str(LIB_DIR))
-
-# import object
-from lib_dataprocess import read_data, PricelistPl
 
 # dataの読み込み
 fp = PJ_DIR / "data" / "raw_pricelist.parquet"
