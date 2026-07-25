@@ -9,20 +9,7 @@ DATA_DIR = PJROOT_DIR / "data"
 
 # オブジェクトのインポート
 from wequant.api import Client
-
-# download可能なファイル
-DOWNLOADABLE_FILES = [
-    "creditbalance.parquet",
-    "finance_quote.parquet",
-    "kessan.parquet",
-    "meigaralist.parquet",
-    "nh225.parquet",
-    "raw_pricelist.parquet",
-    "reviced_pricelist.parquet",
-    "shikiho_online.parquet",
-    "sp500.parquet",
-    "base_portfolio.parquet"
-]
+from wequant.data_files import DOWNLOADABLE_FILES
 
 def download_data():
     """最新データをdeliverサーバからdownloadする"""

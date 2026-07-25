@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from wequant.data_processing import PricelistPl, read_data
+from wequant.data_loading import read_data
+from wequant.data_processing import PricelistPl
 
 
 CURRENT_DIR = Path(__file__).resolve().parent
