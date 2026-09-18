@@ -3,7 +3,7 @@ import sys
 
 import calendar
 import polars as pl
-from typing import Union, Literal
+from typing import Union, Literal, Self
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 from wequant.data_loading import DATA_DIR, load_data_file, read_data
@@ -11,6 +11,22 @@ from wequant.data_files import DOWNLOADABLE_FILES
 
 DATEFORMAT = "%Y-%m-%d"
 DATEFORMAT2 = "%Y年%m月%d日"
+
+def _normalize_column_names(
+    df: pl.DataFrame, rename_map: dict[str, str]
+) -> pl.DataFrame:
+    """存在する旧名だけを変換し、変換済み列と追加列を保持する。
+
+    同じ列の旧名と新名が併存した場合はValueError。型・行・列順は変更しない。
+    必須列の検証は行わず、呼び出し元のDataFrameも変更しない。
+    """
+    columns = set(df.columns)
+    renames = {old: new for old, new in rename_map.items() if old in columns}
+    conflicts = [f"{old} / {new}" for old, new in renames.items() if new in columns]
+    if conflicts:
+        raise ValueError("変換前と変換後の列名が併存しています: " + ", ".join(conflicts))
+    return df.rename(renames) if renames else df
+
 
 # valuation_dateで指定した日の最新通期決算と決算予想をpl.DataFrameで返す
 def get_df_latest_yearly_performance(code: int, valuation_date: date=date.today()) -> pl.DataFrame:
@@ -182,7 +198,7 @@ def get_yearly_settlement_date(dataframe_row) -> date:
 # r = (<code>, <start_date>, <end_date>)をrecord引数として受け取り、
 # r = (<code>, <start_dateからend_dateまでの日経平均の騰落率>)を返す
 def get_nh_updown_rate(r):
-    NhPL = IndexPricelistPl()
+    NhPL = IndexPricelistPl.from_file()
     
     
     
@@ -206,9 +222,14 @@ class CreditbalancePl():
             pl.col("code").cast(pl.Int64)
         ])
 
+    @classmethod
+    def from_file(cls, fp: str | Path = "creditbalance.parquet") -> Self:
+        """管理対象のParquetを読み込み、通常の初期化を行う。省略時は既定ファイル。"""
+        return cls(df=load_data_file(fp))
+
     ###### filterで始まるメソッド。
     # 信用売りに対応した銘柄をfilterして、self.dfを書き換える
-    def filter_unsold_margin_target(self):
+    def filter_unsold_margin_target(self) -> None:
         df = self.df
 
         # 各銘柄の最新データの売残高が0でないリストを作成する
@@ -262,7 +283,7 @@ class CreditbalancePl():
     ###### with_columnsで始まるメソッド
     # 売残、買残それぞれについて前週との差分列を追加する
     # CreditbalancePl.dfを書き換える
-    def with_columns_diff_margin(self):
+    def with_columns_diff_margin(self) -> None:
         df = self.df
 
         ori_cols = df.columns
@@ -296,7 +317,7 @@ class CreditbalancePl():
 
     # 売残、買残それぞれの前週からの増減率列を追加する
     # CreditbalancePl.dfを書き換える
-    def with_columns_diff_margin_rate(self):
+    def with_columns_diff_margin_rate(self) -> None:
         df = self.df
         ori_cols = df.columns
 
@@ -336,23 +357,26 @@ class CreditbalancePl():
         df = df.sort(by=["code", "date"])
         self.df = df
 
-    # 各銘柄の最新データの売り残が0でない銘柄を抽出し、margin_ratio列(信用倍率=売残/買残)を追加。
-    # CreditbalancePl.dfを書き換える
-    def with_columns_margin_ratio(self):
-        self.filter_unsold_margin_target()
+    def with_columns_margin_ratio(self) -> None:
+        """買残高 / 売残高を小数点以下2桁でmargin_ratio列へ追加・更新する。
 
-        df = self.df
-        df = df.with_columns([
-            (pl.col("purchase_margin")/(pl.col("unsold_margin"))).round(2).alias("margin_ratio")
-        ])
+        code、purchase_margin、unsold_margin列を持つデータを対象とする。
+        行・行順を保持し、売残高が0または欠損、買残高が欠損ならnullにする。
+        self.dfを更新し、呼び出し元のDataFrameは変更しない。
+        """
+        self.df = self.df.with_columns(
+            pl.when(pl.col("unsold_margin") != 0)
+            .then(pl.col("purchase_margin") / pl.col("unsold_margin"))
+            .otherwise(None)
+            .round(2)
+            .alias("margin_ratio")
+        )
 
-        self.df = df
-    
     # 信用残高が、dateにおける日足出来高移動平均の何倍あるかを計算した列"unsold_margin_volume_ratio"列と"purchase_margin_volume_ratio"、及び日足出来高移動平均列"ma_{term}"を追加する。
     # CreditbalancePl.dfを書き換える
     # termでは、volumeの移動平均の日数を指定する。
-    def with_columns_margin_volume_ratio(self, term: int=25):
-        RawPL = PricelistPl(fp=DATA_DIR/"raw_pricelist.parquet")
+    def with_columns_margin_volume_ratio(self, term: int=25) -> None:
+        RawPL = PricelistPl.from_file(DATA_DIR/"raw_pricelist.parquet")
         RawPL.with_columns_moving_average(term, col="volume")
         revpl_df = RawPL.df
 
@@ -418,46 +442,31 @@ class CreditbalancePl():
 # private classes
 # 日々の財務データの加工/分析
 class FinancequotePl():
+    _COLUMN_RENAMES = {
+        "mcode": "code",
+        "p_key": "date",
+    }
+
     def __init__(self, df: Union[pl.DataFrame, None]=None):
         # dfの読み込み
         if df is None:
             df = load_data_file("finance_quote.parquet")
         
-        # 列名を修正
-        rename_map_dct = {
-            "mcode": "code",
-            "p_key": "date",
-        }
-        df = df.rename(rename_map_dct)
+        df = _normalize_column_names(df, self._COLUMN_RENAMES)
 
         self.df = df
+
+    @classmethod
+    def from_file(cls, fp: str | Path = "finance_quote.parquet") -> Self:
+        """管理対象のParquetを読み込み、通常の初期化を行う。省略時は既定ファイル。"""
+        return cls(df=load_data_file(fp))
     
     def filter_finance_quotes_by_date(
-    self,
-    specific_date: date = date.today(),
-    inplace: bool = False
-    ) -> pl.DataFrame | None:
-        '''
-        FinancequotePl.dfから、指定日における最新日のデータを抽出する。
-        inplace = Falseの場合は、抽出結果をpl.DataFrameで返す。
-        inplace = Trueの場合は、抽出結果をPortfolioManager.dfにセットしてNoneを返す。
-        '''
-        df = self.df
-
-        df = df.filter(
-            pl.col("date") <= specific_date
-        )
-        latest_date = df["date"].max()
-
-        df = df.filter(
-            pl.col("date") == latest_date
-        )
-
-        if inplace:
-            self.df = df
-            return
-        else:
-            return df
+        self,
+        specific_date: date = date.today(),
+    ) -> None:
+        """指定日以前のデータ全体の最新日の行でself.dfを更新する。"""
+        self.df = self.get_finance_quotes(valuation_date=specific_date)
 
 
     # 指定したcodeの指定した日における各種ファンダメンタルズのレコードをpl.DataFrameで返す
@@ -472,6 +481,11 @@ class FinancequotePl():
     
     # 指定した日における最新の各種ファンダメンタルズのレコードをpl.DataFrameで返す
     def get_finance_quotes(self, valuation_date: date=date.today()) -> pl.DataFrame:
+        """指定日以前の、データ全体の最新日の行を返す。self.dfは変更しない。
+
+        date列を使い、指定日を含む。対象がなければ同じスキーマの空DataFrameを返す。
+        列と行順は保持する。valuation_dateの既定値は既存APIのまま維持する。
+        """
         df = self.df
 
         df = df.filter(pl.col("date")<=valuation_date)
@@ -510,7 +524,7 @@ class FinancequotePl():
         print(f'{company_name}({code})の銘柄情報\n')
 
         # 株価情報の出力
-        PPL = PricelistPl(f'{pricelist_type}.parquet')
+        PPL = PricelistPl.from_file(f'{pricelist_type}.parquet')
         tup = PPL.get_latest_dealingdate_and_price(code, valuation_date)
         stock_price = tup[1]
         print(f'終値: {stock_price}円({tup[0].strftime(DATEFORMAT2)})')
@@ -627,22 +641,35 @@ class FinancequotePl():
         return PricelistPl(df).df
 
 class IndexPricelistPl():
-    def __init__(self, fp: Union[str, Path, pl.DataFrame]="nh225.parquet"):
-        if type(fp) == type(pl.DataFrame()):
-            self.df = fp
-        else:
-            self.df = load_data_file(fp)
+    _COLUMN_RENAMES = {
+        "p_key": "date",
+        "p_open": "open",
+        "p_high": "high",
+        "p_low": "low",
+        "p_close": "close",
+    }
 
-        # 列のrenameをしてない場合は、rename。
-        if "p_key" in self.df.columns:
-            rename_map_dct = {
-                "p_key": "date",
-                "p_open": "open",
-                "p_high": "high",
-                "p_low": "low",
-                "p_close": "close"
-            }
-            self.df = self.df.rename(rename_map_dct)
+    def __init__(
+        self,
+        df: pl.DataFrame | str | Path | None = None,
+        *,
+        fp: pl.DataFrame | str | Path | None = None,
+    ):
+        """DataFrameから生成する。ファイル指定・未指定・fpは旧API互換用。"""
+        if fp is not None:
+            if df is not None:
+                raise TypeError("dfとfpは同時に指定できません。")
+            df = fp
+        if df is None:
+            df = "nh225.parquet"
+        self.df = df if isinstance(df, pl.DataFrame) else load_data_file(df)
+
+        self.df = _normalize_column_names(self.df, self._COLUMN_RENAMES)
+
+    @classmethod
+    def from_file(cls, fp: str | Path = "nh225.parquet") -> Self:
+        """管理対象のParquetを読み込み、通常の初期化を行う。省略時は既定ファイル。"""
+        return cls(df=load_data_file(fp))
     
     # start_dateからend_dateまでの騰落率を返す
     # start_point, end_pointで始まりと終わりの４本値のどの値を選択するか指定できる。
@@ -670,26 +697,36 @@ class IndexPricelistPl():
         
 
 class PricelistPl():
-    # fp = filenameの場合、dirはDATA_DIR
-    # fp = filepathの場合、fpはfilepathとして処理
-    # fp = pl.DataFrameの場合はそのままPricelistPl.dfにpl.DataFrameをセット
-    def __init__(self, fp: Union[str, Path, pl.DataFrame]="reviced_pricelist.parquet"):
-        if type(fp) == type(pl.DataFrame()):
-            self.df = fp
-        else:
-            self.df = load_data_file(fp)
+    _COLUMN_RENAMES = {
+        "mcode": "code",
+        "p_key": "date",
+        "p_open": "open",
+        "p_high": "high",
+        "p_low": "low",
+        "p_close": "close",
+    }
 
-        # 列のrenameをしてない場合は、rename。
-        if "mcode" in self.df.columns:
-            rename_map_dct = {
-                "mcode": "code",
-                "p_key": "date",
-                "p_open": "open",
-                "p_high": "high",
-                "p_low": "low",
-                "p_close": "close"
-            }
-            self.df = self.df.rename(rename_map_dct)
+    def __init__(
+        self,
+        df: pl.DataFrame | str | Path | None = None,
+        *,
+        fp: pl.DataFrame | str | Path | None = None,
+    ):
+        """DataFrameから生成する。ファイル指定・未指定・fpは旧API互換用。"""
+        if fp is not None:
+            if df is not None:
+                raise TypeError("dfとfpは同時に指定できません。")
+            df = fp
+        if df is None:
+            df = "reviced_pricelist.parquet"
+        self.df = df if isinstance(df, pl.DataFrame) else load_data_file(df)
+
+        self.df = _normalize_column_names(self.df, self._COLUMN_RENAMES)
+
+    @classmethod
+    def from_file(cls, fp: str | Path = "reviced_pricelist.parquet") -> Self:
+        """管理対象のParquetを読み込み、通常の初期化を行う。省略時は既定ファイル。"""
+        return cls(df=load_data_file(fp))
 
     # PricelistPlをdailyからweeklyに変更する。
     # 変更される列は、open, high, low, close, volumeのみ。
@@ -1051,44 +1088,17 @@ class PricelistPl():
         
         self.df = df
 
-    # colで指定した列のterm日の移動平均列を、25日移動平均であれば、ma25の
-    # ような列名(maの後ろに移動平均の日数)で追加する。
-    # termで指定した日数での移動平均が計算できない初期のレコードは、dropされてなくなる
-    # 全データで実施すると、かなりメモリを消費するので、200日移動平均などを取得する場合は、
-    # PricelistPl(filename).dfをfilterしてから実施しないとメモリが足りなくなるかもしれない。
-    # メモリが不足して実行プロセスがダウンした場合は、例外も出力されない。
-    def with_columns_moving_average(self, term, col="close"):
-        df = self.df
-        
-        # term数shiftする
-        df = df.with_columns([pl.col(col).alias('s0')])
-        for i in range(1, term-1):
-            df = df.with_columns([pl.col(col).shift(i).alias(f's{str(i)}')])
-        last_col_shift_num = term - 1
-        df = df.with_columns([
-            pl.col(col).shift(last_col_shift_num).alias(f's{str(last_col_shift_num)}'),
-            pl.col("code").shift(last_col_shift_num).alias("code_r")
-        ])
-        
-        # mcode == mcode_rの行のみfilter(抽出)する
-        df = df.filter(pl.col("code")==pl.col("code_r"))
-        
-        # 移動平均を計算
-        df = df.with_columns([pl.lit(0).alias("sum")])
-        for i in range(term):
-            col = f's{str(i)}'
-            df = df.with_columns([
-                (pl.col(col) + pl.col("sum")).alias("sum")
-            ])
-        moving_average_col_name = f'ma{term}'
-        df = df.with_columns([
-            (pl.col("sum") / pl.lit(term)).alias(moving_average_col_name)
-        ])
-        
-        # 必要な列だけ残す
-        df = df.select(self.df.columns + [moving_average_col_name])
-    
-        self.df = df
+    def with_columns_moving_average(self, term, col="close") -> None:
+        """銘柄別にterm行の移動平均をma{term}列へ追加・更新する。
+
+        codeとcolで指定する数値列が必要。各銘柄内の入力順で計算するため、
+        呼び出し側で日付の昇順にしておく。銘柄が混在していても独立に計算する。
+        行・行順を保持し、期間不足や期間内にnullがある場合は結果をnullにする。
+        self.dfを更新し、呼び出し元のDataFrameは変更しない。
+        """
+        self.df = self.df.with_columns(
+            pl.col(col).rolling_mean(window_size=term).over("code").alias(f"ma{term}")
+        )
 
     # colで指定した列のwindow_sizeの移動zsocre列を、25日移動平均であれば、zs25の
     # ような列名(zsの後ろに移動zscoreの日数)で追加する。
@@ -1126,7 +1136,7 @@ class PricelistPl():
     
     # date列の日のpricelist_nh225の日足データを紐づける
     def with_columns_nh225(self) -> None:
-        NhPL = IndexPricelistPl()
+        NhPL = IndexPricelistPl.from_file()
         
         df1 = self.df
         df2 = NhPL.df
@@ -1211,16 +1221,16 @@ class PricelistPl():
 # 決算データを読み込んで加工する。
 # dfをセットしない場合はデフォルトパスのparquetファイルからデータを読み込んでKessanPl.dfをセットする。        
 class KessanPl():
+    _COLUMN_RENAMES = {
+        "mcode": "code",
+    }
+
     def __init__(self, df: Union[pl.DataFrame, None]=None):
         if df is None:
             fp = DATA_DIR/"kessan.parquet"
             df = read_data(fp)
 
-        # 列名を変更
-        if "mcode" in df.columns:
-            df = df.rename({
-                "mcode": "code"
-            })
+        df = _normalize_column_names(df, self._COLUMN_RENAMES)
             
         self.df = df
         
@@ -1234,6 +1244,11 @@ class KessanPl():
         df = df.filter(~condition)
 
         self.df = df
+
+    @classmethod
+    def from_file(cls, fp: str | Path = "kessan.parquet") -> Self:
+        """管理対象のParquetを読み込み、通常の初期化を行う。省略時は既定ファイル。"""
+        return cls(df=load_data_file(fp))
         
     def filter_settlement_type(self, settlement_type: Literal["quaterly", "yearly"]) -> None:
         df = self.df
@@ -1321,8 +1336,7 @@ class KessanPl():
     # 年度決算の実績値における、当該年度の四半期決算の進捗率をpl.DataFrameで作成し、返す
     def get_actual_quatery_settlements_progress_rate(self) -> pl.DataFrame:
         # 四半期単体決算のsales～filal_profitの同一決算期における累積列を追加
-        self.with_columns_accumulated_quaterly_settlement()
-        df = self.df
+        df = self._with_columns_accumulated_quaterly_settlement(self.df)
 
         # 本決算(年度決算)のみ抽出
         ydf = df.filter(pl.col("settlement_type")=="本")
@@ -1382,9 +1396,6 @@ class KessanPl():
         rename_map["acc_final_profit"] = "q_final_profit"
 
         df = df.rename(rename_map)
-
-        # 冒頭のwith_columns_accumulated_quaterly_settlementで計算のために追加した列を削除する
-        self.df = self.df.select(self.df.columns[:-5])
 
         return df
 
@@ -1481,10 +1492,9 @@ class KessanPl():
     # 進捗率は、evaluation_date時における当期最新決算予想に対する四半期決算の進捗率。
     def get_expected_quatery_settlements_progress_rate(self, valuation_date: date=date.today()) -> pl.DataFrame:
         # 四半期単体決算のsales～filal_profitの同一決算期における累積列を追加
-        self.with_columns_accumulated_quaterly_settlement()
+        df = self._with_columns_accumulated_quaterly_settlement(self.df)
 
         # 決算発表日はvaludation_dateよりも前
-        df = self.df
         df = df.filter(pl.col("announcement_date")<valuation_date)
 
         # yearly_settlement_dateはvaludation_date以降
@@ -1553,9 +1563,6 @@ class KessanPl():
 
         df = df.rename(rename_map)
 
-        # 冒頭のwith_columns_accumulated_quaterly_settlementで計算のために追加した列を削除する
-        self.df = self.df.select(self.df.columns[:-5])
-
         return df
 
     # codeで指定した銘柄のvaluation_date時点で発表済の四半期決算を、新しいものからnum個返す
@@ -1573,7 +1580,10 @@ class KessanPl():
 
     # valuation_date時点で発表済最新の全銘柄の四半期決算リストを返す
     def get_latest_quater_settlements(self, valuation_date: date=date.today()) -> pl.DataFrame:
-        df = self.df
+        return self._get_latest_quater_settlements(self.df, valuation_date)
+
+    @staticmethod
+    def _get_latest_quater_settlements(df: pl.DataFrame, valuation_date: date) -> pl.DataFrame:
         #元の列の順番を保存しておく
         ori_cols = df.columns
 
@@ -1600,9 +1610,13 @@ class KessanPl():
     
     # valuation_date時点で発表済最新の全銘柄の本決算、四半期決算のリストを返す
     def get_latest_settlements(self, valuation_date: date=date.today()) -> pl.DataFrame:
-        df1 = self.get_latest_quater_settlements(valuation_date)
-        df2 = self.get_latest_yearly_settlements(valuation_date, settlement_type="本")
-        df3 = self.get_latest_yearly_settlements(valuation_date, settlement_type="予")
+        return self._get_latest_settlements(self.df, valuation_date)
+
+    @classmethod
+    def _get_latest_settlements(cls, df: pl.DataFrame, valuation_date: date) -> pl.DataFrame:
+        df1 = cls._get_latest_quater_settlements(df, valuation_date)
+        df2 = cls._get_latest_yearly_settlements(df, valuation_date, settlement_type="本")
+        df3 = cls._get_latest_yearly_settlements(df, valuation_date, settlement_type="予")
 
         df = pl.concat([df1, df2, df3])
 
@@ -1618,7 +1632,14 @@ class KessanPl():
     
     # valuation_date時点で発表済最新の全銘柄の本決算、またはリストを返す
     def get_latest_yearly_settlements(self, valuation_date: date=date.today(), settlement_type: Literal["本", "予"]="本") -> pl.DataFrame:
-        df = self.df
+        return self._get_latest_yearly_settlements(self.df, valuation_date, settlement_type)
+
+    @staticmethod
+    def _get_latest_yearly_settlements(
+        df: pl.DataFrame,
+        valuation_date: date,
+        settlement_type: Literal["本", "予"] = "本",
+    ) -> pl.DataFrame:
         #元の列の順番を保存しておく
         ori_cols = df.columns
 
@@ -1647,7 +1668,7 @@ class KessanPl():
         self, 
         code: int,
         valuation_date: date = date.today()
-    ):
+    ) -> pl.DataFrame:
         """
         指定した銘柄のvaluation_date時点で発表済の本決算情報と翌年度決算予想を返す
         """
@@ -1774,7 +1795,7 @@ class KessanPl():
         })
         kpl_df = df.select(["code", "start_date", "end_date"])
         
-        RevPl = PricelistPl()
+        RevPl = PricelistPl.from_file()
         kpl_df = RevPl.get_stockprice_updown_rate(kpl_df, start_point="open", end_point="close")
         
         # 決算データは存在するが、日足データが存在しない銘柄がある。
@@ -1786,7 +1807,7 @@ class KessanPl():
             return kpl_df
         
         # indexの騰落率を追加する場合は以下、続き。
-        NhPL = IndexPricelistPl()
+        NhPL = IndexPricelistPl.from_file()
         tbl = []
         for r in kpl_df.iter_rows():
             r = list(r)
@@ -1837,8 +1858,8 @@ class KessanPl():
     
     # valuation_dateを含む決算期の直前期決算の対前年同期売上高成長率、対売上高差分利益成長率から計算した決算予想一覧を取得する。
     def get_settlement_forcast_by_diff_growth_rate(self, valuation_date: date=date.today()) -> pl.DataFrame:
-        self.with_columns_next_settlement_forcast_by_diff_growth_rate()
-        df = self.get_latest_settlements(valuation_date)
+        df = self._with_columns_next_settlement_forcast_by_diff_growth_rate(self.df)
+        df = self._get_latest_settlements(df, valuation_date)
     
     
     
@@ -2013,7 +2034,7 @@ class KessanPl():
         result1_df = yitems_df.select(["code", "settlement_date", "updown_rate"])
         
         # 日経平均を連結する
-        nh_df = IndexPricelistPl().df
+        nh_df = IndexPricelistPl.from_file().df
         term_df = yitems_df.select(["code", "settlement_date", "start_date", "end_date"])
         # start_date
         nh_df1 = nh_df.with_columns([
@@ -2121,11 +2142,10 @@ class KessanPl():
         
         return df
 
-    def with_columns_accumulated_quaterly_settlement(self) -> None:
+    @classmethod
+    def _with_columns_accumulated_quaterly_settlement(cls, df: pl.DataFrame) -> pl.DataFrame:
         # KessanPl.dfに年度決算日列を追加
-        self.with_columns_yearly_settlement_date()
-
-        df = self.df
+        df = cls._with_columns_yearly_settlement_date(df)
         tcol = "settlement_type"
         target_cols = ["sales", "operating_income", "ordinary_profit", "final_profit"]
         on_keys = ["code", "yearly_settlement_date"]
@@ -2154,7 +2174,7 @@ class KessanPl():
         
         # 第4四半期決算レコード
         # 本決算からコピー
-        original_cols = self.df.columns
+        original_cols = df.columns
         q4df = df.filter(pl.col(tcol)=="四").filter(pl.col(qcol)==4)
         qydf = df.filter(pl.col(tcol)=="本")
         pdf = q4df.join(qydf, on=on_keys, how="left")
@@ -2212,7 +2232,10 @@ class KessanPl():
         # nullは削除する
         df = df.drop_nulls()
 
-        self.df = df
+        return df
+
+    def with_columns_accumulated_quaterly_settlement(self) -> None:
+        self.df = self._with_columns_accumulated_quaterly_settlement(self.df)
 
 
     def with_columns_columns_ratio(
@@ -2259,7 +2282,7 @@ class KessanPl():
         '''
 
         df = self.df
-        MPL = MeigaralistPl()
+        MPL = MeigaralistPl.from_file()
         df2 = MPL.df.select(["code", "name"])
         df3 = result = df2.join(df, on=["code"], how="right")
 
@@ -2279,8 +2302,9 @@ class KessanPl():
     # 利益改善度合いを見るために利用する。
     # 決算予想の場合は、昨年度の実績に対して出す。
     # 次期移行の予想はnull。
-    def with_columns_diff_growth_rate(self) -> None:
-        df = self.df
+    @staticmethod
+    def _with_columns_diff_growth_rate(df: pl.DataFrame) -> pl.DataFrame:
+        source_df = df
         ori_cols = df.columns
 
         # 四半期
@@ -2381,7 +2405,7 @@ class KessanPl():
         df = pl.concat([qdf, ydf, fdf])
 
         # なくなったレコードを元に戻す
-        df2 = self.df
+        df2 = source_df
         df2 = df2.join(df, on=["code", "settlement_date", "announcement_date", "settlement_type"], how="anti")
         added_cols = df.columns[-4:]
         for c in added_cols:
@@ -2390,8 +2414,14 @@ class KessanPl():
             ])
         df = pl.concat([df, df2])
 
-        self.df = df
-        self._sort_df()
+        return df.sort([
+            pl.col("code"),
+            pl.col("announcement_date"),
+            pl.col("settlement_type")
+        ])
+
+    def with_columns_diff_growth_rate(self) -> None:
+        self.df = self._with_columns_diff_growth_rate(self.df)
 
     def with_columns_expected_quatery_settlements_progress_rate(self, valuation_date: date=date.today()) -> None:
         # 四半期単体決算のsales～filal_profitの同一決算期における累積列を追加
@@ -2469,7 +2499,7 @@ class KessanPl():
     # 前年同期からのsales-final_profitまでの成長率列を追加する。
     # 追加される列の列名は、gr_{col}
     # KessanPl.dfのsettlement_type="予"は除外される
-    def with_columns_growth_rate(self):
+    def with_columns_growth_rate(self) -> None:
         ori_cols = self.df.columns
 
         self.with_columns_lastyear_settlement()
@@ -2635,7 +2665,7 @@ class KessanPl():
     # 直前の決算情報列を追加する。
     # 本決算の場合は前年同期、四半期決算の場合は全四半期
     # KessanPl.dfのsettlement_type="予"は除外される
-    def with_columns_latest_settlement(self):
+    def with_columns_latest_settlement(self) -> None:
         ori_cols = self.df.columns
 
         # 本決算
@@ -2718,15 +2748,15 @@ class KessanPl():
     # 前決算(本決算なら昨年、四半期決算なら前四半期)の昨年同期~当期までのdiff_growth_rateを使って予想したsales～final_profitまでの値列を追加する
     # 追加される列名は、fcst_dgr_{colname}
     # KessanPl.dfの各銘柄の最新決算については、翌年度の予想レコードも追加。この場合は、sales~filal_profitまでの各列はnull値とする
-    def with_columns_next_settlement_forcast_by_diff_growth_rate(self) -> None:
-        ori_cols = self.df.columns
+    @classmethod
+    def _with_columns_next_settlement_forcast_by_diff_growth_rate(cls, df: pl.DataFrame) -> pl.DataFrame:
+        ori_cols = df.columns
         col_prefix = "fcst_dgr_"
 
         # KessanPl.dfの最新決算まで
         if not "diff_operating_income_growth_rate" in ori_cols:
-            self.with_columns_diff_growth_rate()
+            df = cls._with_columns_diff_growth_rate(df)
 
-        df = self.df
         df = df.drop_nulls()
         
         # 売上高
@@ -2780,7 +2810,10 @@ class KessanPl():
             rdf[rdf.columns[-1]].alias("nxt_settlement_date")
         ])
         
-        self.df = df
+        return df
+
+    def with_columns_next_settlement_forcast_by_diff_growth_rate(self) -> None:
+        self.df = self._with_columns_next_settlement_forcast_by_diff_growth_rate(self.df)
 
     
     def with_columns_profit_rate(self) -> None:
@@ -2840,7 +2873,7 @@ class KessanPl():
 
         
         # reviced_pricelist読込
-        rpl_df = PricelistPl().df
+        rpl_df = PricelistPl.from_file().df
 
         # reviced_pricelist 翌営業日始値列を追加
         rpl_df = rpl_df.with_columns([
@@ -2911,8 +2944,8 @@ class KessanPl():
 
         self.df = df
         
-    def with_columns_yearly_settlement_date(self) -> None:
-        df = self.df
+    @staticmethod
+    def _with_columns_yearly_settlement_date(df: pl.DataFrame) -> pl.DataFrame:
         original_cols = df.columns
 
         # 最終行の1つ前にsettlement_dateの列indexを、
@@ -2930,7 +2963,7 @@ class KessanPl():
 
         # 列名を元に戻す
         col_dct = {}
-        num_original_cols = len(self.df.columns)
+        num_original_cols = len(original_cols)
         for i in range(num_original_cols):
             c1 = f"column_{str(i)}"
             col_dct[c1] = original_cols[i]
@@ -2945,7 +2978,10 @@ class KessanPl():
             f'column_{str(num_new_cols-3)}'
         ])
 
-        self.df = df.rename(col_dct)
+        return df.rename(col_dct)
+
+    def with_columns_yearly_settlement_date(self) -> None:
+        self.df = self._with_columns_yearly_settlement_date(self.df)
 
     
     # scrapingの際、正しく決算発表日が取得できなかったレコードを、仮にdate(1900, 1, 1)としstockdbにinsertされているが、
@@ -2975,18 +3011,23 @@ class KessanPl():
         self.df = df
 
 class MeigaralistPl():
+    _COLUMN_RENAMES = {
+        "mcode": "code",
+        "mname": "name",
+    }
+
     def __init__(self, df: Union[pl.DataFrame, None]=None):
         # dfの読み込み
         if df is None:
             df = load_data_file("meigaralist.parquet")
-        # 列名を変更
-        if "mcode" in df.columns:
-            df = df.rename({
-                "mcode": "code",
-                "mname": "name"
-            })
+        df = _normalize_column_names(df, self._COLUMN_RENAMES)
         
         self.df = df
+
+    @classmethod
+    def from_file(cls, fp: str | Path = "meigaralist.parquet") -> Self:
+        """管理対象のParquetを読み込み、通常の初期化を行う。省略時は既定ファイル。"""
+        return cls(df=load_data_file(fp))
     
     # 証券コードから、会社名を取得して返す
     def get_name(self, code: int) -> str:
@@ -3000,33 +3041,31 @@ class PortfolioManager():
         
         self.df = df
 
+    @classmethod
+    def from_file(cls, fp: str | Path = "base_portfolio.parquet") -> Self:
+        """管理対象のParquetを読み込み、通常の初期化を行う。省略時は既定ファイル。"""
+        return cls(df=load_data_file(fp))
+
+    def get_portfolio_as_of_specific_date(
+        self,
+        specific_date: date | None = None,
+    ) -> pl.DataFrame:
+        """指定日以前の、データ全体の最新日の行を返す。self.dfは変更しない。
+
+        date列を使い、指定日を含む。対象がなければ同じスキーマの空DataFrameを返す。
+        列と行順は保持し、specific_date省略時は呼び出し時の今日を使用する。
+        """
+        if specific_date is None:
+            specific_date = date.today()
+        df = self.df.filter(pl.col("date") <= specific_date)
+        return df.filter(pl.col("date") == pl.col("date").max())
+
     def filter_portfolio_as_of_specific_date(
         self,
-        specific_date: date = date.today(),
-        inplace: bool = False
-    ) -> pl.DataFrame | None:        
-        '''
-        PortfolioManager.dfから、指定日における最新日のデータを抽出する。
-        (最も古いデータは2026年1月1日)
-        inplace = Falseの場合は、抽出結果をpl.DataFrameで返す。
-        inplace = Trueの場合は、抽出結果をPortfolioManager.dfにセットしてNoneを返す。
-        '''
-        df = self.df
-
-        df = df.filter(
-            pl.col("date") <= specific_date
-        )
-        latest_date = df["date"].max()
-
-        df = df.filter(
-            pl.col("date") == latest_date
-        )
-
-        if inplace:
-            self.df = df
-            return
-        else:
-            return df
+        specific_date: date | None = None,
+    ) -> None:
+        """指定日以前のデータ全体の最新日の行でself.dfを更新する。"""
+        self.df = self.get_portfolio_as_of_specific_date(specific_date)
 
     def get_individual_stocks(
         self,
@@ -3043,7 +3082,7 @@ class PortfolioManager():
         df = self.df
 
         # 指定日の最新portfolioを抽出
-        df = self.filter_portfolio_as_of_specific_date(specific_date)
+        df = self.get_portfolio_as_of_specific_date(specific_date)
 
         # 個別株のみ選別
         df = df.filter(
@@ -3122,9 +3161,9 @@ class PortfolioManager():
 
         # finance_quateのデータ
         # code, 'expected_PER', expected_dividend_yield
-        FQ = FinancequotePl()
+        FQ = FinancequotePl.from_file()
         cols = ['code', 'expected_PER', 'expected_dividend_yield']
-        df1 = FQ.filter_finance_quotes_by_date(specific_date)
+        df1 = FQ.get_finance_quotes(valuation_date=specific_date)
         df1 = df1[cols]
         # code列を文字列に変更
         df1 = df1.with_columns(
@@ -3148,7 +3187,7 @@ class PortfolioManager():
                 holdings.append(int(c))
             except:
                 continue
-        K = KessanPl()
+        K = KessanPl.from_file()
         K.filter_by_codes(holdings)
         K.filter_by_settlement_type("四")
         K.with_columns_growth_rate()
@@ -3207,19 +3246,24 @@ class PortfolioManager():
 
 # shikiho.parquetを読みこんでデータの抽出、加工、分析などを行う
 class ShikihoOnlinePl():
+    _COLUMN_RENAMES = {
+        "mcode": "code",
+        "mname": "name",
+    }
+
     def __init__(self, df: Union[pl.DataFrame, None]=None):
         # dfの読み込み
         if df is None:
             df = load_data_file("shikiho_online.parquet")
         
-        # 列名を変更
-        if "mcode" in df.columns:
-            df = df.rename({
-                "mcode": "code",
-                "mname": "name"
-            })
+        df = _normalize_column_names(df, self._COLUMN_RENAMES)
 
         self.df = df
+
+    @classmethod
+    def from_file(cls, fp: str | Path = "shikiho_online.parquet") -> Self:
+        """管理対象のParquetを読み込み、通常の初期化を行う。省略時は既定ファイル。"""
+        return cls(df=load_data_file(fp))
     
     # target_dateで指定した日における最新発行済のデータを抽出する
     def get_latest_df(self, target_date: date=date.today()) -> pl.DataFrame:

@@ -1,6 +1,8 @@
 # wequqnt/cli.py
 import typer
 
+from wequant.flows.download_data import download_data_flow
+
 app = typer.Typer(help="wequant CLI")
 
 @app.command()
@@ -14,12 +16,9 @@ def describe():
     print("analysis tool for stock market")
 
 
-## 最新データをdeliverサーバからdownloadする
-from wequant.commands.download_data import download_data
 @app.command()
 def dl_pq():
     """最新データをdeliverサーバからdownloadする"""
     print("Downloading latest data from deliver server...")
-    # ここに実際のダウンロード処理を実装
-    download_data()
+    download_data_flow()
     print("Download complete.")

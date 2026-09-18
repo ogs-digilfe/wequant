@@ -1,24 +1,48 @@
 from unittest import TestCase
-from unittest.mock import call, patch
+from unittest.mock import Mock
 
-from wequant.commands.download_data import DOWNLOADABLE_FILES, download_data
-from wequant.data_files import DOWNLOADABLE_FILES as CENTRAL_DOWNLOADABLE_FILES
-from wequant.data_processing import DOWNLOADABLE_FILES as PROCESSING_DOWNLOADABLE_FILES
+from wequant.data_files import DOWNLOADABLE_FILES
+from wequant.flows.download_data import DownloadDataResult, download_data_flow
+from wequant.tasks.download_file import DownloadFileTask, list_downloadable_files
 
 
-class DownloadDataTests(TestCase):
-    def test_uses_central_downloadable_files_definition(self):
-        self.assertIs(DOWNLOADABLE_FILES, CENTRAL_DOWNLOADABLE_FILES)
-        self.assertIs(PROCESSING_DOWNLOADABLE_FILES, CENTRAL_DOWNLOADABLE_FILES)
+class DownloadDataFlowTests(TestCase):
+    def test_coordinates_tasks_and_returns_structured_result(self):
+        download_file = Mock(side_effect=lambda filename: filename)
 
-    @patch("wequant.commands.download_data.Client")
-    def test_downloads_each_configured_file(self, client_class):
-        client = client_class.return_value
+        result = download_data_flow(
+            list_files=lambda: ("first.parquet", "second.parquet"),
+            download_file=download_file,
+        )
 
-        download_data()
-
-        client_class.assert_called_once_with()
         self.assertEqual(
-            client.download.call_args_list,
-            [call(filename) for filename in DOWNLOADABLE_FILES],
+            result,
+            DownloadDataResult(
+                downloaded_files=("first.parquet", "second.parquet")
+            ),
+        )
+        self.assertEqual(
+            [call.args for call in download_file.call_args_list],
+            [("first.parquet",), ("second.parquet",)],
+        )
+
+
+class DownloadFileTaskTests(TestCase):
+    def test_lists_the_central_downloadable_files_definition(self):
+        self.assertEqual(list_downloadable_files(), tuple(DOWNLOADABLE_FILES))
+
+    def test_reuses_one_client_to_download_multiple_files(self):
+        client = Mock()
+        client_factory = Mock(return_value=client)
+        task = DownloadFileTask(client_factory=client_factory)
+
+        first_result = task("first.parquet")
+        second_result = task("second.parquet")
+
+        self.assertEqual(first_result, "first.parquet")
+        self.assertEqual(second_result, "second.parquet")
+        client_factory.assert_called_once_with()
+        self.assertEqual(
+            [call.args for call in client.download.call_args_list],
+            [("first.parquet",), ("second.parquet",)],
         )

@@ -22,10 +22,11 @@ class CliTests(TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.stdout.strip(), "analysis tool for stock market")
 
-    @patch("wequant.cli.download_data")
-    def test_dl_pq_delegates_without_network_access(self, download_data):
+    @patch("wequant.cli.download_data_flow")
+    def test_dl_pq_delegates_without_network_access(self, download_data_flow):
         result = self.runner.invoke(app, ["dl-pq"])
 
         self.assertEqual(result.exit_code, 0)
-        download_data.assert_called_once_with()
+        download_data_flow.assert_called_once_with()
+        self.assertIn("Downloading latest data", result.stdout)
         self.assertIn("Download complete.", result.stdout)

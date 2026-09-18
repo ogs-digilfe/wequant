@@ -10,6 +10,7 @@ import polars as pl
 from polars.testing import assert_frame_equal
 
 from wequant.data_processing import (
+    CreditbalancePl,
     FinancequotePl,
     IndexPricelistPl,
     MeigaralistPl,
@@ -105,7 +106,7 @@ class DataFrameWrapperTests(TestCase):
         )
         quotes = FinancequotePl(source)
 
-        actual = quotes.filter_finance_quotes_by_date(date(2024, 1, 8))
+        actual = quotes.get_finance_quotes(valuation_date=date(2024, 1, 8))
 
         expected = pl.DataFrame(
             {
@@ -210,3 +211,62 @@ class GraphBehaviorTests(TestCase):
         self.assertEqual(list(chart.fig.data[1].y), [1000, 1500])
         self.assertEqual(chart.fig.layout.yaxis.title.text, "株価")
         self.assertEqual(chart.fig.layout.yaxis2.title.text, "出来高")
+
+
+class RowPreservingColumnsTests(TestCase):
+    def test_moving_average_preserves_rows_and_separates_interleaved_codes(self):
+        source = pl.DataFrame({
+            "code": [1, 2, 1, 2, 1, 2],
+            "date": [date(2024, 1, day) for day in [1, 1, 2, 2, 3, 3]],
+            "close": [10., 100., 20., 200., 30., 300.],
+        })
+        before = source.clone()
+        prices = PricelistPl(source)
+        self.assertIsNone(prices.with_columns_moving_average(2))
+        assert_frame_equal(prices.df.select(source.columns), before)
+        self.assertEqual(prices.df["ma2"].to_list(), [None, None, 15., 150., 25., 250.])
+        assert_frame_equal(source, before)
+        expected = prices.df.clone()
+        prices.with_columns_moving_average(2)
+        assert_frame_equal(prices.df, expected)
+
+    def test_moving_average_null_windows_short_history_and_custom_column(self):
+        source = pl.DataFrame({"code": [1]*5 + [2], "volume": [10., None, 30., 40., 50., 60.]})
+        prices = PricelistPl(source)
+        prices.with_columns_moving_average(2, col="volume")
+        self.assertEqual(prices.df["ma2"].to_list(), [None, None, None, 35., 45., None])
+        assert_frame_equal(prices.df.select(source.columns), source)
+        prices.with_columns_moving_average(1, col="volume")
+        self.assertEqual(prices.df["ma1"].to_list(), source["volume"].to_list())
+        prices.with_columns_moving_average(10, col="volume")
+        self.assertEqual(prices.df["ma10"].null_count(), source.height)
+
+    def test_margin_ratio_keeps_codes_and_handles_zero_and_missing_values(self):
+        source = pl.DataFrame({
+            "code": [1, 2, 1, 2, 3, 4, 5],
+            "date": [date(2024, 1, day) for day in [1, 1, 2, 2, 1, 1, 1]],
+            "purchase_margin": [10., 10., 20., 0., 10., None, 0.],
+            "unsold_margin": [3., 0., 0., 2., None, 2., 0.],
+        })
+        before = source.clone()
+        credit = CreditbalancePl(source)
+        self.assertIsNone(credit.with_columns_margin_ratio())
+        self.assertEqual(credit.df["margin_ratio"].to_list(), [3.33, None, None, 0., None, None, None])
+        assert_frame_equal(credit.df.select(source.columns), before)
+        assert_frame_equal(source, before)
+        expected = credit.df.clone()
+        credit.with_columns_margin_ratio()
+        assert_frame_equal(credit.df, expected)
+
+    def test_empty_frames_keep_schema_and_add_result_column(self):
+        cases = [
+            (PricelistPl, {"code": pl.Int64, "close": pl.Float64}, "with_columns_moving_average", (2,), "ma2"),
+            (CreditbalancePl, {"code": pl.Int64, "purchase_margin": pl.Float64, "unsold_margin": pl.Float64}, "with_columns_margin_ratio", (), "margin_ratio"),
+        ]
+        for wrapper, schema, method, args, result in cases:
+            with self.subTest(method=method):
+                source = pl.DataFrame(schema=schema)
+                instance = wrapper(source)
+                self.assertIsNone(getattr(instance, method)(*args))
+                self.assertEqual(instance.df.height, 0)
+                self.assertEqual(instance.df.schema, {**schema, result: pl.Float64})

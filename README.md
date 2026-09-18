@@ -1,30 +1,36 @@
 # wequant
 
-株式市場分析ツールです。Pythonパッケージは`src/wequant/`に配置し、
-コマンドラインインターフェースとして`wq`を提供します。
+`wequant`は、株式投資分析のために収集したデータを、加工・分析・可視化するPythonプロジェクトです。
+収集したデータは、データサーバ(deliver)にparquet型式で保存されており、各データは定期的に自動更新されています。
 
-## 開発環境のセットアップ
+本プロジェクトのPythonパッケージは`src/wequant/`に配置し、CLIとして`wq`を提供します。
 
-Python環境と依存関係は`uv`で管理します。Python 3.12と`uv`を利用できる
-環境で、リポジトリルートから次のコマンドを実行してください。
+## 必要な環境
+
+- Python 3.12以上
+- [uv](https://docs.astral.sh/uv/)
+
+標準のPythonバージョンは`.python-version`、依存関係は`pyproject.toml`と
+`uv.lock`で管理します。
+
+## セットアップ
+
+リポジトリルート（この`README.md`があるディレクトリ）で実行します。
 
 ```bash
 uv sync
 ```
 
-`.python-version`に基づいてPython 3.12が選択され、`uv.lock`に従って
-依存関係が`.venv/`へインストールされます。`.venv/`を手動で有効化せず、
-コマンドは`uv run`経由で実行できます。
+`uv`は`uv.lock`に従い、リポジトリ直下の`.venv/`へ環境を作成します。
+仮想環境を手動で有効化せず、以降のコマンドは`uv run`経由で実行できます。
 
-依存関係は`pyproject.toml`へ追加し、`uv.lock`も同じ変更に含めます。
-`requirements.txt`は使用しません。
+Deliver APIを使用する場合は、設定例をコピーして`.env`を作成します。
 
-## ローカル設定
+```bash
+cp .env.sample .env
+```
 
-Deliver APIを利用するコマンドには、ローカルな環境設定が必要です。
-
-1. `.env.sample`を`.env`へコピーします。
-2. `.env`内のプレースホルダーを手元の接続情報へ置き換えます。
+`.env`のプレースホルダーを実際の接続情報へ置き換えてください。
 
 ```dotenv
 WEQUANT_DELIVER_BASE_URL=https://example.invalid
@@ -32,41 +38,34 @@ WEQUANT_DELIVER_USERNAME=replace-with-your-username
 WEQUANT_DELIVER_PASSWORD=replace-with-your-password
 ```
 
-`.env`はGit管理対象外です。設定済みのプロセス環境変数がある場合は、
-その値が`.env`より優先されます。秘密値をログ、Issue、チャット、
-Notebook出力へ記載しないでください。
+`.env`はGit管理対象外です。同名のプロセス環境変数がある場合は、その値が
+`.env`より優先されます。秘密値をログ、Issue、チャット、Notebook出力へ
+記載しないでください。
 
-## CLI
+## ビルド
 
-利用できるコマンドは、リポジトリルートから次のコマンドで確認できます。
+配布用のwheelとsource distributionを作成します。
+
+```bash
+uv build
+```
+
+成果物はGit管理対象外の`dist/`に出力されます。
+
+## 動作確認
 
 ```bash
 uv run wq --help
-```
-
-アプリケーション名と説明は、それぞれ次のコマンドで表示できます。
-
-```bash
-uv run wq get-app-name
-uv run wq describe
-```
-
-## Parquetファイルのダウンロード
-
-リポジトリルートから次のコマンドを実行します。
-
-```bash
-uv run wq dl-pq
-```
-
-Deliver APIから取得したParquetファイルは、Git管理対象外の`data/`へ
-保存されます。同名のファイルがすでに存在する場合は上書きされます。
-
-## テスト
-
-外部通信を行わない単体テストは、リポジトリルートから次のコマンドで
-実行します。
-
-```bash
 uv run python -m unittest discover -s tests -v
 ```
+
+単体テストは外部通信を行いません。
+
+## ドキュメント
+
+- [アーキテクチャ](docs/ARCHITECTURE.md): コード配置、各モジュールの責務、実装時の基本設計
+- [CLIリファレンス](docs/REFERENCE.md): `wq`コマンドの仕様、設定、利用例
+- [リファクタリング開始時点の記録](docs/refactoring-baseline.md): 現在の構成へ移行する前のスナップショット
+- [エージェント向け作業規約](AGENTS.md): AIエージェントが変更を行う際の規則と検証方針
+
+外部ホストを含むシステム全体の設計は、今後別途整理します。
