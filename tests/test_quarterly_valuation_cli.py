@@ -24,6 +24,7 @@ def output_frame(count=1):
         "PER": [12.3456] * count,
         "divr": [None] * count,
         "perf": [10.125] * count,
+        "bm": [5.25] * count,
     })
 
 
@@ -31,6 +32,10 @@ class QuarterlyValuationCliTests(TestCase):
     @patch("wequant.data_processing.load_data_file")
     def test_cli_with_real_flow_and_calculations(self, load):
         data = {
+            "nh225.parquet": pl.DataFrame({
+                "p_key": [date(2026, 7, 21), date(2026, 10, 19)],
+                "p_open": [200., 220.],
+            }),
             "meigaralist.parquet": pl.DataFrame({"mcode": [1001], "mname": ["試験銘柄"]}),
             "kessan.parquet": pl.DataFrame({
                 "mcode": [1001, 1001],
@@ -53,9 +58,9 @@ class QuarterlyValuationCliTests(TestCase):
         result = CliRunner().invoke(app, ["quarterly-valuation", "--valuation-date", "2026-09-19"])
         self.assertEqual(result.exit_code, 0, result.exception)
         self.assertEqual(result.stdout.splitlines()[1].split(), [
-            "1001", "試験銘柄", "2026-06-30", "2026-07-20", "120", "10", "8.33%", "20.00%", "10.00%", "12.00", "3.33", "null",
+            "1001", "試験銘柄", "2026-06-30", "2026-07-20", "120", "10", "8.33%", "20.00%", "10.00%", "12.00", "3.33", "null", "null",
         ])
-        self.assertEqual(load.call_count, 4)
+        self.assertEqual(load.call_count, 5)
         result = CliRunner().invoke(app, ["quarterly-valuation", "--valuation-date", "2026-09-19",
                                           "--profit", "ordinary"])
         self.assertEqual(result.exit_code, 0, result.exception)
@@ -75,6 +80,10 @@ class QuarterlyValuationCliTests(TestCase):
     @patch("wequant.data_processing.load_data_file")
     def test_perf_with_real_flow_and_future_data(self, load):
         data = {
+            "nh225.parquet": pl.DataFrame({
+                "p_key": [date(2026, 7, 21), date(2026, 10, 19)],
+                "p_open": [200., 220.],
+            }),
             "meigaralist.parquet": pl.DataFrame({"code": [1001], "name": ["試験銘柄"]}),
             "kessan.parquet": pl.DataFrame({
                 "code": [1001, 1001],
@@ -95,10 +104,10 @@ class QuarterlyValuationCliTests(TestCase):
         }
         load.side_effect = data.__getitem__
         result = CliRunner().invoke(app, ["quarterly-valuation", "--valuation-date", "2026-09-19",
-                                          "--sort-columns", "perf"])
+                                          "--sort-columns", "bm"])
         self.assertEqual(result.exit_code, 0, result.exception)
-        self.assertEqual(result.stdout.splitlines()[0].split()[-1], "perf")
-        self.assertEqual(result.stdout.splitlines()[1].split()[-1], "20.00%")
+        self.assertEqual(result.stdout.splitlines()[0].split()[-2:], ["perf", "bm"])
+        self.assertEqual(result.stdout.splitlines()[1].split()[-2:], ["20.00%", "10.00%"])
 
     @patch("wequant.cli.quarterly_valuation_flow")
     def test_defaults_and_full_output(self, flow):
@@ -128,6 +137,7 @@ class QuarterlyValuationCliTests(TestCase):
             pl.Series("grsl", [0.27, -10.5, 0.0, None]),
             pl.Series("dgrp", [0.25, -0.125, 0.0, None]),
             pl.Series("perf", [20.125, -10.5, 0.0, None]),
+            pl.Series("bm", [20.125, -10.5, 0.0, None]),
         )
         flow.return_value = frame
         before = frame.clone()
@@ -229,7 +239,7 @@ class QuarterlyValuationFlowTests(TestCase):
     @patch("wequant.flows.quarterly_valuation.build_quarterly_valuation")
     @patch("wequant.flows.quarterly_valuation.load_quarterly_valuation_inputs")
     def test_flow_passes_inputs_and_options(self, load, build):
-        load.return_value = (object(), object(), object(), object())
+        load.return_value = (object(), object(), object(), object(), object())
         expected = build.return_value = output_frame()
         result = quarterly_valuation_flow(date(2026, 9, 19), ["grsl"], "asc", codes=[7203],
                                           sls_min=100, sls_max=200, grsl_min=-10, grsl_max=50, start_row=2, end_row=5, profit="ordinary", profit_min=-20.5, profit_max=100)
@@ -241,14 +251,16 @@ class QuarterlyValuationFlowTests(TestCase):
             sls_min=100, sls_max=200, grsl_min=-10, grsl_max=50, start_row=2, end_row=5, profit="ordinary", profit_min=-20.5, profit_max=100,
         )
 
+    @patch("wequant.tasks.quarterly_valuation.IndexPricelistPl.from_file")
     @patch("wequant.tasks.quarterly_valuation.MeigaralistPl.from_file")
     @patch("wequant.tasks.quarterly_valuation.PricelistPl.from_file")
     @patch("wequant.tasks.quarterly_valuation.FinancequotePl.from_file")
     @patch("wequant.tasks.quarterly_valuation.KessanPl.from_file")
-    def test_loader_uses_adjusted_prices(self, settlements, quotes, prices, names):
+    def test_loader_uses_adjusted_prices(self, settlements, quotes, prices, names, index):
         self.assertEqual(load_quarterly_valuation_inputs(), (
-            settlements.return_value, quotes.return_value, prices.return_value, names.return_value,
+            settlements.return_value, quotes.return_value, prices.return_value, names.return_value, index.return_value,
         ))
+        index.assert_called_once_with()
         names.assert_called_once_with()
         settlements.assert_called_once_with()
         quotes.assert_called_once_with()

@@ -1373,6 +1373,7 @@ class KessanPl():
 
     def get_quarterly_performance(
         self, quarterly_df: pl.DataFrame, pricelist_df: pl.DataFrame,
+        index_df: pl.DataFrame | None = None,
     ) -> pl.DataFrame:
         """選択済み四半期の発表翌取引日から次回発表翌取引日までの騰落率を返す。
 
@@ -1385,7 +1386,13 @@ class KessanPl():
         戻り値はcode/perf（Float64、%単位、丸めなし、code昇順）。次回発表なし、
         次回発表が今回以前、株価なし、始値が非正・非有限・nullならperfはnull。
         同一銘柄・株価日の完全一致はまとめ、異なる始値はValueErrorとする。
-        空入力は同じスキーマの空結果を返す。self.dfと入力は変更しない。
+        index_df指定時はdate（Date型）/openを使い、perfと同じ取引日の始値で
+        bm（Float64、%、丸めなし）も返す。日付は完全一致で結合する。
+        次回発表・取引日・指数の有効な始値がなければbmはnull。
+        個別株の始値が無効でも日付があれば指数は計算する。
+        指数の同日同値はまとめ、異なる始値はValueErrorとする。
+        未指定時の出力は従来どおりcode/perf。空入力も同じスキーマで返す。
+        self.dfと入力は変更しない。
         """
         history = self.df.filter(pl.col("settlement_type") == "四").group_by(
             "code", "settlement_date"
@@ -1403,7 +1410,7 @@ class KessanPl():
                               pl.col("open").alias(output)).sort("trade_date"),
                 left_on=announcement, right_on="trade_date", by="code",
                 strategy="forward", allow_exact_matches=False, check_sortedness=False,
-            ).drop("trade_date")
+            ).rename({"trade_date": output.replace("_open", "_date")})
         start, end = pl.col("start_open"), pl.col("end_open")
         perf = (end / start - 1) * 100
         valid = (
@@ -1411,9 +1418,28 @@ class KessanPl():
             & (start > 0) & start.is_finite() & (end > 0) & end.is_finite()
             & perf.is_finite()
         )
-        return periods.select(
-            "code", pl.when(valid).then(perf).otherwise(None).alias("perf"),
-        ).sort("code")
+        outputs = [pl.col("code"), pl.when(valid).then(perf).otherwise(None).alias("perf")]
+        if index_df is not None:
+            index_prices = index_df.select("date", pl.col("open").cast(pl.Float64)).unique()
+            if index_prices.select("date").is_duplicated().any():
+                raise ValueError("同一指数・株価日に異なる始値があります。")
+            for boundary in ("start", "end"):
+                periods = periods.join(
+                    index_prices.select(
+                        pl.col("date").alias(f"{boundary}_date"),
+                        pl.col("open").alias(f"bm_{boundary}_open"),
+                    ),
+                    on=f"{boundary}_date", how="left", validate="m:1",
+                )
+            bm_start, bm_end = pl.col("bm_start_open"), pl.col("bm_end_open")
+            bm = (bm_end / bm_start - 1) * 100
+            valid_bm = (
+                (pl.col("next_annd") > pl.col("annd"))
+                & (bm_start > 0) & bm_start.is_finite()
+                & (bm_end > 0) & bm_end.is_finite() & bm.is_finite()
+            )
+            outputs.append(pl.when(valid_bm).then(bm).otherwise(None).alias("bm"))
+        return periods.select(outputs).sort("code")
 
     def filter_settlement_type(self, settlement_type: Literal["quaterly", "yearly"]) -> None:
         df = self.df

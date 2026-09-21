@@ -116,7 +116,7 @@ def quarterly_valuation(
             return f"{rounded:,f}"
         if column == "dgrp":
             return f"{value * 100:.2f}%"
-        if column in ("grsl", "pr", "perf"):
+        if column in ("grsl", "pr", "perf", "bm"):
             return f"{value:.2f}%"
         if column in ("PER", "divr"):
             return f"{value:.2f}"

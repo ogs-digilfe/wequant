@@ -53,7 +53,7 @@ class PortfolioFlowTests(TestCase):
     @patch("wequant.flows.quarterly_valuation.load_quarterly_valuation_inputs")
     @patch("wequant.flows.quarterly_valuation.load_portfolio_codes")
     def test_flag_and_intersection(self, holdings, load, build):
-        load.return_value = (object(), object(), object(), object())
+        load.return_value = (object(), object(), object(), object(), object())
         holdings.return_value = [5334, 7203]
         for enabled, codes, expected in [
             (False, "all", "all"), (True, "all", [5334, 7203]),
@@ -79,6 +79,7 @@ class PortfolioCliIntegrationTests(TestCase):
     @patch("wequant.data_processing.load_data_file")
     def test_real_flow_filtering_warning_and_empty_output(self, load):
         data = {
+            "nh225.parquet": pl.DataFrame(schema={"date": pl.Date, "open": pl.Float64}),
             "base_portfolio.parquet": pl.DataFrame({
                 "date": [date(2026, 9, 1)] * 4,
                 "ticker_code": ["5334", "7203", "9999", "INVALID"],

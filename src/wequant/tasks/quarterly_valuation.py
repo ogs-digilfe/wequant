@@ -6,19 +6,20 @@ from typing import Literal
 
 import polars as pl
 
-from wequant.data_processing import FinancequotePl, KessanPl, MeigaralistPl, PortfolioManager, PricelistPl
+from wequant.data_processing import IndexPricelistPl, FinancequotePl, KessanPl, MeigaralistPl, PortfolioManager, PricelistPl
 
 
-OUTPUT_COLUMNS = ("code", "name", "setd", "annd", "sls", "prft", "pr", "grsl", "dgrp", "PER", "divr", "perf")
+OUTPUT_COLUMNS = ("code", "name", "setd", "annd", "sls", "prft", "pr", "grsl", "dgrp", "PER", "divr", "perf", "bm")
 
 
-def load_quarterly_valuation_inputs() -> tuple[KessanPl, FinancequotePl, PricelistPl, MeigaralistPl]:
+def load_quarterly_valuation_inputs() -> tuple[KessanPl, FinancequotePl, PricelistPl, MeigaralistPl, IndexPricelistPl]:
     """管理対象のローカルParquetを読み込む。通信・保存は行わない。"""
     return (
         KessanPl.from_file(),
         FinancequotePl.from_file(),
         PricelistPl.from_file("reviced_pricelist.parquet"),
         MeigaralistPl.from_file(),
+        IndexPricelistPl.from_file(),
     )
 
 
@@ -46,6 +47,7 @@ def build_quarterly_valuation(
     quotes: FinancequotePl,
     prices: PricelistPl,
     meigaras: MeigaralistPl,
+    index_prices: IndexPricelistPl | None = None,
     *,
     valuation_date: date,
     sort_columns: list[str] | None = None,
@@ -61,8 +63,9 @@ def build_quarterly_valuation(
     profit_min: float | None = None,
     profit_max: float | None = None,
 ) -> pl.DataFrame:
-    """入力を変更せず12列の評価一覧を返す。nullは末尾、同値はcode昇順。
+    """入力を変更せず13列の評価一覧を返す。nullは末尾、同値はcode昇順。
 
+    index_pricesはnh225の指数。省略時はbmをnullにする（既存呼び出し互換）。
     start_row/end_rowは抽出・ソート後の1始まりの範囲（両端を含む）。
     end_row=Noneは末尾まで。範囲が件数を超えた分は切り詰める。
     codes="all"は全銘柄、整数リストは指定銘柄のみ（空リストは0件）。
@@ -85,7 +88,12 @@ def build_quarterly_valuation(
         raise ValueError("sort_orderはascまたはdescを指定してください。")
 
     quarterly = settlements.get_quarterly_valuation(valuation_date, profit=profit)
-    performance = settlements.get_quarterly_performance(quarterly, prices.df)
+    performance = settlements.get_quarterly_performance(
+        quarterly, prices.df,
+        index_prices.df if index_prices is not None else None,
+    )
+    if index_prices is None:
+        performance = performance.with_columns(pl.lit(None, dtype=pl.Float64).alias("bm"))
     quarterly = quarterly.join(performance, on="code", how="left", validate="1:1")
     valuations = quotes.get_price_adjusted_valuations(prices.df, valuation_date)
     result = quarterly.join(valuations, on="code", how="left", validate="1:1")

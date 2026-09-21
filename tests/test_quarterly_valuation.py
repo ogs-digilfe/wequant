@@ -108,7 +108,7 @@ class QuarterlyCalculationTests(TestCase):
         for source in (kessan([]), kessan([settlement(1, 2025, 100, 10)])):
             result = source.get_quarterly_valuation(VALUATION_DATE)
             self.assertEqual(result.height, 0)
-            self.assertEqual(result.columns, [c for c in OUTPUT_COLUMNS if c not in ("name", "PER", "divr", "perf")])
+            self.assertEqual(result.columns, [c for c in OUTPUT_COLUMNS if c not in ("name", "PER", "divr", "perf", "bm")])
 
 
 class PriceAdjustmentTests(TestCase):
@@ -421,7 +421,7 @@ class QuarterlyPerformanceTests(TestCase):
                                           valuation_date=VALUATION_DATE,
                                           sort_columns=["perf"], sort_order="asc")
         self.assertEqual(result["code"].to_list(), [2, 1])
-        self.assertEqual(result.columns[-1], "perf")
+        self.assertEqual(result.columns[-2:], ["perf", "bm"])
 
     def test_missing_and_invalid_prices_do_not_skip_first_trading_day(self):
         cases = [(100., 100., 0.), (100., 80., -20.), (None, 120., None),
@@ -467,3 +467,84 @@ class QuarterlyPerformanceTests(TestCase):
         conflicting = pl.concat([price_df, price_df.with_columns(pl.lit(99.).alias("open"))])
         with self.assertRaisesRegex(ValueError, "異なる始値"):
             source.get_quarterly_performance(current, conflicting)
+
+
+class QuarterlyBenchmarkTests(TestCase):
+    def setUp(self):
+        self.source = kessan([
+            settlement(code, 2026, 100, 10, month=month)
+            for code in (1, 2) for month in (6, 9)
+        ])
+        self.current = self.source.get_quarterly_valuation(VALUATION_DATE)
+        self.prices = pl.DataFrame({
+            "code": [1, 1, 2, 2],
+            "date": [date(2026, 7, 21), date(2026, 10, 21),
+                     date(2026, 7, 22), date(2026, 10, 22)],
+            "open": [100., 120., 100., 90.], "close": [100.] * 4,
+        })
+        self.index = pl.DataFrame({
+            "date": [date(2026, 7, 20), date(2026, 7, 21), date(2026, 7, 22),
+                     date(2026, 10, 21), date(2026, 10, 22)],
+            "open": [999., 200., 400., 220., 360.],
+        }).reverse()
+
+    def test_exact_stock_dates_sort_and_no_mutation(self):
+        from wequant.data_processing import IndexPricelistPl
+
+        frames = [self.source.df, self.current, self.prices, self.index]
+        before = [df.clone() for df in frames]
+        result = self.source.get_quarterly_performance(
+            self.current, self.prices.reverse(), pl.concat([self.index, self.index]),
+        )
+        self.assertAlmostEqual(result["bm"][0], 10)
+        self.assertAlmostEqual(result["bm"][1], -10)
+        names = MeigaralistPl(pl.DataFrame({"code": [1, 2], "name": ["A", "B"]}))
+        result = build_quarterly_valuation(
+            self.source, quotes([]), PricelistPl(self.prices), names, IndexPricelistPl(self.index),
+            valuation_date=VALUATION_DATE, sort_columns=["bm"], sort_order="asc",
+        )
+        self.assertEqual(result["code"].to_list(), [2, 1])
+        self.assertEqual(result.columns[-2:], ["perf", "bm"])
+        for actual, expected in zip(frames, before):
+            assert_frame_equal(actual, expected)
+
+    def test_missing_invalid_and_empty(self):
+        for value in (None, 0., -1., float("nan"), float("inf")):
+            for boundary in (date(2026, 7, 21), date(2026, 10, 21)):
+                with self.subTest(value=value, boundary=boundary):
+                    index = self.index.with_columns(
+                        pl.when(pl.col("date") == boundary).then(pl.lit(value, dtype=pl.Float64))
+                        .otherwise(pl.col("open")).alias("open")
+                    )
+                    result = self.source.get_quarterly_performance(self.current, self.prices, index)
+                    self.assertIsNone(result["bm"][0])
+                    self.assertAlmostEqual(result["perf"][0], 20)
+        # 隣接日のデータがあっても、当日が欠けていれば補完しない。
+        missing = self.index.filter(pl.col("date") != date(2026, 7, 21))
+        self.assertIsNone(self.source.get_quarterly_performance(
+            self.current, self.prices, missing,
+        )["bm"][0])
+        for prices_df, index in ((self.prices.clear(), self.index),
+                                 (self.prices, self.index.clear())):
+            result = self.source.get_quarterly_performance(self.current, prices_df, index)
+            self.assertEqual(result["bm"].to_list(), [None, None])
+        no_next = kessan([settlement(1, 2026, 100, 10)])
+        self.assertIsNone(no_next.get_quarterly_performance(
+            self.current.head(1), self.prices, self.index,
+        )["bm"][0])
+        empty = self.source.get_quarterly_performance(self.current.clear(), self.prices, self.index)
+        self.assertEqual(empty.schema, {"code": pl.Int64, "perf": pl.Float64, "bm": pl.Float64})
+        self.assertEqual(empty.height, 0)
+
+    def test_invalid_stock_open_does_not_remove_dates_and_conflicts_fail(self):
+        result = self.source.get_quarterly_performance(
+            self.current, self.prices.with_columns(pl.lit(None, dtype=pl.Float64).alias("open")),
+            self.index,
+        )
+        self.assertEqual(result["perf"].to_list(), [None, None])
+        self.assertAlmostEqual(result["bm"][0], 10)
+        conflicting = pl.concat([
+            self.index, self.index.head(1).with_columns(pl.lit(9999.).alias("open")),
+        ])
+        with self.assertRaisesRegex(ValueError, "異なる始値"):
+            self.source.get_quarterly_performance(self.current, self.prices, conflicting)
