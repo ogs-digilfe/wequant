@@ -11,7 +11,9 @@
 ```text
 wequant/
 ├── src/wequant/            # Pythonパッケージ
-│   ├── commands/           # CLIから呼び出すユースケース
+│   ├── commands/           # 既存の互換用ユースケース
+│   ├── flows/              # Taskを組み合わせる処理
+│   ├── tasks/              # 読み込み・加工などの処理単位
 │   ├── api.py              # Deliver APIとの通信
 │   ├── cli.py              # TyperによるCLI定義
 │   ├── config.py           # 環境変数と.envの読み込み
@@ -37,10 +39,36 @@ wequant/
 ### CLIとコマンド
 
 `cli.py`はTyperアプリケーションと公開コマンドを定義します。CLI固有の引数解釈や
-メッセージ表示にとどめ、まとまった処理は`commands/`以下へ委譲します。
+メッセージ表示にとどめ、まとまった処理は`flows/`以下へ委譲します。
 
-`commands/download_data.py`はダウンロードのユースケースを組み立てます。管理対象
-ファイルを列挙し、APIクライアントへ取得を依頼します。
+`flows/download_data.py`は管理対象ファイルを列挙し、`tasks/download_file.py`の
+Taskを通じてAPIクライアントへ取得を依頼します。
+
+`flows/quarterly_valuation.py`は四半期銘柄評価の読み込みと加工を組み立て、
+DataFrameを返します。`tasks/quarterly_valuation.py`の読み込みTaskは
+`KessanPl.from_file()`、`FinancequotePl.from_file()`、
+`PricelistPl.from_file("reviced_pricelist.parquet")`、`MeigaralistPl.from_file()`を使用します。
+加工Taskは、`KessanPl.get_quarterly_valuation`と
+`FinancequotePl.get_price_adjusted_valuations`の結果を銘柄コードで左結合し、
+銘柄名の結合、`codes="all"`または整数リストによる絞り込み、`sls`・`grsl`・選択利益`prft`の上下限による絞り込み、出力12列の選択とソートを行います。
+`KessanPl.get_quarterly_performance`には選択済み決算と分割調整済み株価の
+DataFrameを渡し、今回・次回の発表翌取引日の始値による騰落率`perf`（%）を結合します。
+次回は次の決算期の最初の四半期実績発表で、評価日より後の履歴も使用します。
+入力の状態は変更せず、次回発表や有効な始値がない場合はnullを返します。
+範囲フィルタは最新決算の選択後に丸め前の値へ適用します。
+`profit`はCLIからFlow・加工Taskを経由して`KessanPl.get_quarterly_valuation`へ渡します。
+既定は営業利益（operating）、経常利益（ordinary）も選択できます。`prft`に選択利益、直後の`pr`に当期利益率（利益/売上×100、%）を返します。
+`pr`は売上が正で売上・利益・結果が有限の場合に計算し、赤字・0を保持、それ以外はnullです。
+加工Taskは最後に、抽出・ソート済みの一覧へ`start_row`・`end_row`の行範囲を適用します。加工メソッドは状態を変更せず、他データを
+必要とする場合はDataFrameを引数で受け取ります。表示はCLIの責務です。
+`--portfolio`指定時は、Flowから同じTaskモジュールの
+`load_portfolio_codes(valuation_date)`を呼び出します。このTaskは
+`PortfolioManager.from_file().get_individual_stocks(...)`を使い、評価日以前の
+ポートフォリオ全体の最新日から個別株コードを返します。整数に変換できないコードは
+件数を標準エラーへ通知して除外します。Flowは取得コードと`codes`の共通部分を
+既存の加工Taskへ渡します。フラグ未指定時はポートフォリオを読み込みません。
+
+Task・Flowは通常のPython関数であり、実行基盤の追加依存はありません。
 
 ### 設定と外部通信
 
@@ -77,7 +105,8 @@ APIを参照しているため、公開名や呼び出し方を変える前に�
 ```text
 wq dl-pq
   → cli.py
-  → commands/download_data.py
+  → flows/download_data.py
+  → tasks/download_file.py
   → config.py（接続設定の読み込み）
   → api.py（認証、HTTP通信、ファイル保存）
   → data/（同名ファイルを上書き）
@@ -370,3 +399,13 @@ portfolio.filter_portfolio_as_of_specific_date(specific_date=valuation_date)
 
 Notebookには長時間処理やファイル更新などの副作用が含まれる可能性があります。
 対象と副作用を確認せずに一括実行しないでください。
+
+### 株価履歴一覧
+
+`cli.py`の`price-history`は引数検証と表の標準出力を担当します。
+`flows/price_history.py`は読み込み・抽出Taskを組み合わせ、DataFrameを返します。
+`tasks/price_history.py`の`load_price_history`は選択されたファイルを
+`PricelistPl.from_file()`で読み込み、`select_price_history`は銘柄・期間の
+抽出、7列の選択、日付昇順の並べ替えを行います。
+銘柄コードは文字列として照合し、整数型と英字入りの文字列型に対応します。
+入力のDataFrameは変更せず、表示・保存はTask・Flowでは行いません。

@@ -461,6 +461,55 @@ class FinancequotePl():
         """管理対象のParquetを読み込み、通常の初期化を行う。省略時は既定ファイル。"""
         return cls(df=load_data_file(fp))
     
+    def get_price_adjusted_valuations(
+        self, prices_df: pl.DataFrame, valuation_date: date | None = None
+    ) -> pl.DataFrame:
+        """銘柄ごとの予想PER・配当利回りを調整後株価比率で補正して返す。
+
+        self.dfにはcode/date/expected_PER/expected_dividend_yield、prices_dfには
+        code/date/closeが必要。dateはDate型、指標・終値は数値型とする。
+        株価は同一の分割調整済み日足履歴を渡す。両データともdate < 評価日から
+        銘柄ごとの最新行を選ぶ。基準株価はFinancequoteと同日の値だけを使用。
+        戻り値はcode/PER（倍）/divr（%）。状態・入力を変更せず、丸めない。
+        正でない株価、正でないPER、負の配当率、欠損・非有限値は該当指標をnullに
+        する。無配の0%は保持。同一キーの異なる値はValueError。空入力も扱う。
+        """
+        valuation_date = date.today() if valuation_date is None else valuation_date
+        quotes = self.df.select(
+            "code", "date", "expected_PER", "expected_dividend_yield"
+        ).filter(pl.col("date") < valuation_date)
+        quotes = quotes.filter(pl.col("date") == pl.col("date").max().over("code")).unique()
+        if quotes.select("code").is_duplicated().any():
+            raise ValueError("Financequoteの最新日に異なる指標の重複行があります。")
+
+        prices = prices_df.select("code", "date", "close").filter(
+            pl.col("date") < valuation_date
+        ).unique()
+        if prices.select("code", "date").is_duplicated().any():
+            raise ValueError("株価の同一銘柄・同一日に異なる終値があります。")
+        latest = prices.filter(pl.col("date") == pl.col("date").max().over("code"))
+        df = quotes.join(
+            prices.rename({"close": "base_close"}),
+            on=["code", "date"], how="left", validate="1:1",
+        ).join(
+            latest.select("code", pl.col("close").alias("latest_close")),
+            on="code", how="left", validate="1:1",
+        )
+        p0 = pl.col("base_close").cast(pl.Float64)
+        p1 = pl.col("latest_close").cast(pl.Float64)
+        per = pl.col("expected_PER").cast(pl.Float64)
+        divr = pl.col("expected_dividend_yield").cast(pl.Float64)
+        valid_prices = (p0 > 0) & p0.is_finite() & (p1 > 0) & p1.is_finite()
+        adjusted_per = per * (p1 / p0)
+        adjusted_divr = divr * (p0 / p1)
+        return df.select(
+            "code",
+            pl.when(valid_prices & (per > 0) & per.is_finite() & adjusted_per.is_finite())
+            .then(adjusted_per).otherwise(None).alias("PER"),
+            pl.when(valid_prices & (divr >= 0) & divr.is_finite() & adjusted_divr.is_finite())
+            .then(adjusted_divr).otherwise(None).alias("divr"),
+        ).sort("code")
+
     def filter_finance_quotes_by_date(
         self,
         specific_date: date = date.today(),
@@ -1250,6 +1299,122 @@ class KessanPl():
         """管理対象のParquetを読み込み、通常の初期化を行う。省略時は既定ファイル。"""
         return cls(df=load_data_file(fp))
         
+    def get_quarterly_valuation(
+        self, valuation_date: date | None = None,
+        profit: Literal["operating", "ordinary"] = "operating",
+    ) -> pl.DataFrame:
+        """直近93日発表の最新四半期と前年同月の比較を返す（状態変更なし）。
+
+        code、Date型settlement_date/announcement_date、settlement_type、数値型
+        salesと、選択した利益列（operating_incomeまたはordinary_profit）を使用。四半期単体の元データを使い、累積化しない。
+        評価日当日以降の発表を除き、93日前を含む。銘柄ごとに決算期末日、発表日の
+        順で最新行を選ぶ。前年同月も評価日前の履歴から同じ順で最新行を選ぶ。
+        同一銘柄・期末日・発表日の異なる値はValueError、完全一致行はまとめる。
+        戻り値はcode/setd/annd/sls/prft/pr/grsl/dgrp。金額の単位は入力のまま、
+        grslは売上成長率（%）、dgrpは選択した利益の前年差/売上高前年差（100倍しない）。
+        当期・前年の売上が正の場合だけgrslを計算。dgrpはさらに両期の選択した利益が
+        正で売上高前年差が0でない場合だけ計算する。計算結果の負値・0は保持。
+        欠損・非有限値・比較先なしは該当指標をnullにし、行を残す。丸めない。
+        profitはoperating（営業利益、既定）またはordinary（経常利益）。
+        prft列は選択した利益、pr列はprft/sls*100（%）を返す。
+        prは当期売上が正で売上・利益・計算結果が有限の場合に計算し、赤字・0も保持。
+        それ以外はnullとする。前年データは不要。
+        空入力・対象なしは同じ出力スキーマの空DataFrameを返す。
+        """
+        if profit not in ("operating", "ordinary"):
+            raise ValueError("profitはoperatingまたはordinaryを指定してください。")
+        profit_column = "operating_income" if profit == "operating" else "ordinary_profit"
+        valuation_date = date.today() if valuation_date is None else valuation_date
+        history = self.df.filter(
+            (pl.col("settlement_type") == "四") & (pl.col("announcement_date") < valuation_date)
+        ).select("code", "settlement_date", "announcement_date", "sales",
+                 pl.col(profit_column).alias("selected_profit"))
+        history = history.filter(
+            pl.col("announcement_date")
+            == pl.col("announcement_date").max().over(["code", "settlement_date"])
+        ).unique()
+        if history.select("code", "settlement_date").is_duplicated().any():
+            raise ValueError("同一銘柄・決算期・最新発表日に異なる決算値があります。")
+        history = history.with_columns(
+            pl.col("settlement_date").dt.year().alias("year"),
+            pl.col("settlement_date").dt.month().alias("month"),
+        ).sort(["code", "settlement_date", "announcement_date"])
+        current = history.filter(
+            pl.col("announcement_date") >= valuation_date - timedelta(days=93)
+        ).unique(subset="code", keep="last", maintain_order=True)
+        previous = history.unique(subset=["code", "year", "month"], keep="last").select(
+            "code", (pl.col("year") + 1).alias("year"), "month",
+            pl.col("sales").alias("previous_sales"),
+            pl.col("selected_profit").alias("previous_profit"),
+        )
+        df = current.join(previous, on=["code", "year", "month"], how="left", validate="m:1")
+        sales = pl.col("sales").cast(pl.Float64)
+        previous_sales = pl.col("previous_sales").cast(pl.Float64)
+        selected_profit = pl.col("selected_profit").cast(pl.Float64)
+        previous_profit = pl.col("previous_profit").cast(pl.Float64)
+        valid_sales = (sales > 0) & sales.is_finite() & (previous_sales > 0) & previous_sales.is_finite()
+        grsl = (sales / previous_sales - 1) * 100
+        pr = selected_profit / sales * 100
+        valid_pr = (sales > 0) & sales.is_finite() & selected_profit.is_finite() & pr.is_finite()
+        dgrp = (selected_profit - previous_profit) / (sales - previous_sales)
+        valid_dgrp = (
+            valid_sales & (selected_profit > 0) & selected_profit.is_finite()
+            & (previous_profit > 0) & previous_profit.is_finite()
+            & (sales != previous_sales) & dgrp.is_finite()
+        )
+        return df.select(
+            "code", pl.col("settlement_date").alias("setd"),
+            pl.col("announcement_date").alias("annd"),
+            pl.col("sales").alias("sls"), pl.col("selected_profit").alias("prft"),
+            pl.when(valid_pr).then(pr).otherwise(None).alias("pr"),
+            pl.when(valid_sales & grsl.is_finite()).then(grsl).otherwise(None).alias("grsl"),
+            pl.when(valid_dgrp).then(dgrp).otherwise(None).alias("dgrp"),
+        ).sort("code")
+
+    def get_quarterly_performance(
+        self, quarterly_df: pl.DataFrame, pricelist_df: pl.DataFrame,
+    ) -> pl.DataFrame:
+        """選択済み四半期の発表翌取引日から次回発表翌取引日までの騰落率を返す。
+
+        quarterly_dfはcode/setd/annd（1銘柄1行、日付はDate型）。self.dfの
+        code/settlement_date/announcement_date/settlement_typeから、次の決算期の
+        四半期実績（四）の最初の発表を選ぶ。同一期の訂正は次回に含めない。
+        評価日より後の履歴も使用する。株価は分割調整済みのcode/date/openで、
+        Date型dateが各発表日より厳密に後の最初の行を銘柄ごとに選ぶ。
+        入力の株価行は取引があった日を表す前提。始値が無効でも後日に飛ばさない。
+        戻り値はcode/perf（Float64、%単位、丸めなし、code昇順）。次回発表なし、
+        次回発表が今回以前、株価なし、始値が非正・非有限・nullならperfはnull。
+        同一銘柄・株価日の完全一致はまとめ、異なる始値はValueErrorとする。
+        空入力は同じスキーマの空結果を返す。self.dfと入力は変更しない。
+        """
+        history = self.df.filter(pl.col("settlement_type") == "四").group_by(
+            "code", "settlement_date"
+        ).agg(pl.col("announcement_date").min().alias("next_annd"))
+        periods = quarterly_df.select("code", "setd", "annd").sort("setd").join_asof(
+            history.sort("settlement_date"), left_on="setd", right_on="settlement_date",
+            by="code", strategy="forward", allow_exact_matches=False, check_sortedness=False,
+        )
+        prices = pricelist_df.select("code", "date", pl.col("open").cast(pl.Float64)).unique()
+        if prices.select("code", "date").is_duplicated().any():
+            raise ValueError("同一銘柄・株価日に異なる始値があります。")
+        for announcement, output in (("annd", "start_open"), ("next_annd", "end_open")):
+            periods = periods.sort(announcement).join_asof(
+                prices.select("code", pl.col("date").alias("trade_date"),
+                              pl.col("open").alias(output)).sort("trade_date"),
+                left_on=announcement, right_on="trade_date", by="code",
+                strategy="forward", allow_exact_matches=False, check_sortedness=False,
+            ).drop("trade_date")
+        start, end = pl.col("start_open"), pl.col("end_open")
+        perf = (end / start - 1) * 100
+        valid = (
+            (pl.col("next_annd") > pl.col("annd"))
+            & (start > 0) & start.is_finite() & (end > 0) & end.is_finite()
+            & perf.is_finite()
+        )
+        return periods.select(
+            "code", pl.when(valid).then(perf).otherwise(None).alias("perf"),
+        ).sort("code")
+
     def filter_settlement_type(self, settlement_type: Literal["quaterly", "yearly"]) -> None:
         df = self.df
         
