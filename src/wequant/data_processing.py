@@ -1310,7 +1310,7 @@ class KessanPl():
         評価日当日以降の発表を除き、93日前を含む。銘柄ごとに決算期末日、発表日の
         順で最新行を選ぶ。前年同月も評価日前の履歴から同じ順で最新行を選ぶ。
         同一銘柄・期末日・発表日の異なる値はValueError、完全一致行はまとめる。
-        戻り値はcode/setd/annd/sls/prft/pr/grsl/dgrp。金額の単位は入力のまま、
+        戻り値はcode/setd/annd/sls/prft/pr/grsl/dgrp/ngrpr。金額の単位は入力のまま、
         grslは売上成長率（%）、dgrpは選択した利益の前年差/売上高前年差（100倍しない）。
         当期・前年の売上が正の場合だけgrslを計算。dgrpはさらに両期の選択した利益が
         正で売上高前年差が0でない場合だけ計算する。計算結果の負値・0は保持。
@@ -1319,6 +1319,11 @@ class KessanPl():
         prft列は選択した利益、pr列はprft/sls*100（%）を返す。
         prは当期売上が正で売上・利益・計算結果が有限の場合に計算し、赤字・0も保持。
         それ以外はnullとする。前年データは不要。
+        ngrprは前年同期から3か月後（同一年月）の売上nlslsと選択利益nlprofitを使う。
+        nsls=nlsls*(1+grsl/100)、nprofit=nlprofit+(nsls-nlsls)*dgrp、
+        ngrpr=(nprofit-nlprofit)/nlprofit*100（Float64、%）。評価日前の最新訂正を使う。
+        grsl/dgrpが無効、比較先なし、欠損・非有限値、nlprofit=0ならnull。
+        nlprofitの負値と、計算結果の負値・0は保持する。
         空入力・対象なしは同じ出力スキーマの空DataFrameを返す。
         """
         if profit not in ("operating", "ordinary"):
@@ -1348,6 +1353,15 @@ class KessanPl():
             pl.col("selected_profit").alias("previous_profit"),
         )
         df = current.join(previous, on=["code", "year", "month"], how="left", validate="m:1")
+        # 前年同期の次四半期は当期から9か月前。同じ年月を使い、欠落期は飛ばさない。
+        next_previous = history.unique(subset=["code", "year", "month"], keep="last").select(
+            "code",
+            pl.col("settlement_date").dt.offset_by("9mo").dt.year().alias("year"),
+            pl.col("settlement_date").dt.offset_by("9mo").dt.month().alias("month"),
+            pl.col("sales").alias("next_previous_sales"),
+            pl.col("selected_profit").alias("next_previous_profit"),
+        )
+        df = df.join(next_previous, on=["code", "year", "month"], how="left", validate="m:1")
         sales = pl.col("sales").cast(pl.Float64)
         previous_sales = pl.col("previous_sales").cast(pl.Float64)
         selected_profit = pl.col("selected_profit").cast(pl.Float64)
@@ -1362,6 +1376,16 @@ class KessanPl():
             & (previous_profit > 0) & previous_profit.is_finite()
             & (sales != previous_sales) & dgrp.is_finite()
         )
+        nlsls = pl.col("next_previous_sales").cast(pl.Float64)
+        nlprofit = pl.col("next_previous_profit").cast(pl.Float64)
+        nsls = nlsls * (1 + grsl / 100)
+        nprofit = nlprofit + (nsls - nlsls) * dgrp
+        ngrpr = (nprofit - nlprofit) / nlprofit * 100
+        valid_ngrpr = (
+            valid_dgrp & grsl.is_finite() & nlsls.is_finite()
+            & nlprofit.is_finite() & (nlprofit != 0)
+            & nsls.is_finite() & nprofit.is_finite() & ngrpr.is_finite()
+        )
         return df.select(
             "code", pl.col("settlement_date").alias("setd"),
             pl.col("announcement_date").alias("annd"),
@@ -1369,19 +1393,25 @@ class KessanPl():
             pl.when(valid_pr).then(pr).otherwise(None).alias("pr"),
             pl.when(valid_sales & grsl.is_finite()).then(grsl).otherwise(None).alias("grsl"),
             pl.when(valid_dgrp).then(dgrp).otherwise(None).alias("dgrp"),
+            pl.when(valid_ngrpr).then(ngrpr).otherwise(None).alias("ngrpr"),
         ).sort("code")
 
     def get_quarterly_performance(
         self, quarterly_df: pl.DataFrame, pricelist_df: pl.DataFrame,
         index_df: pl.DataFrame | None = None,
+        *, perf_period: Literal["quarter", "announcement"] = "quarter",
     ) -> pl.DataFrame:
-        """選択済み四半期の発表翌取引日から次回発表翌取引日までの騰落率を返す。
+        """選択した期間の始値による騰落率を返す。
+
+        perf_period="quarter"は今回発表翌取引日から次回発表翌取引日まで。
+        "announcement"は次回発表当日からその翌取引日まで。当日は完全一致で
+        取得し、休場日・欠損時はnull。場中・引け後の発表を区別しない。
 
         quarterly_dfはcode/setd/annd（1銘柄1行、日付はDate型）。self.dfの
         code/settlement_date/announcement_date/settlement_typeから、次の決算期の
         四半期実績（四）の最初の発表を選ぶ。同一期の訂正は次回に含めない。
         評価日より後の履歴も使用する。株価は分割調整済みのcode/date/openで、
-        Date型dateが各発表日より厳密に後の最初の行を銘柄ごとに選ぶ。
+        翌取引日はDate型dateが発表日より厳密に後の最初の行を銘柄ごとに選ぶ。
         入力の株価行は取引があった日を表す前提。始値が無効でも後日に飛ばさない。
         戻り値はcode/perf（Float64、%単位、丸めなし、code昇順）。次回発表なし、
         次回発表が今回以前、株価なし、始値が非正・非有限・nullならperfはnull。
@@ -1394,6 +1424,8 @@ class KessanPl():
         未指定時の出力は従来どおりcode/perf。空入力も同じスキーマで返す。
         self.dfと入力は変更しない。
         """
+        if perf_period not in ("quarter", "announcement"):
+            raise ValueError("perf_periodはquarterまたはannouncementを指定してください。")
         history = self.df.filter(pl.col("settlement_type") == "四").group_by(
             "code", "settlement_date"
         ).agg(pl.col("announcement_date").min().alias("next_annd"))
@@ -1404,7 +1436,18 @@ class KessanPl():
         prices = pricelist_df.select("code", "date", pl.col("open").cast(pl.Float64)).unique()
         if prices.select("code", "date").is_duplicated().any():
             raise ValueError("同一銘柄・株価日に異なる始値があります。")
-        for announcement, output in (("annd", "start_open"), ("next_annd", "end_open")):
+        boundaries = [("next_annd", "end_open")]
+        if perf_period == "quarter":
+            boundaries.insert(0, ("annd", "start_open"))
+        else:
+            periods = periods.join(
+                prices.select(
+                    "code", pl.col("date").alias("next_annd"),
+                    pl.col("date").alias("start_date"), pl.col("open").alias("start_open"),
+                ),
+                on=["code", "next_annd"], how="left", validate="m:1",
+            )
+        for announcement, output in boundaries:
             periods = periods.sort(announcement).join_asof(
                 prices.select("code", pl.col("date").alias("trade_date"),
                               pl.col("open").alias(output)).sort("trade_date"),

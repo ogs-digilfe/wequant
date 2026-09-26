@@ -21,6 +21,7 @@ def output_frame(count=1):
         "pr": [12.5] * count,
         "grsl": [20.0] * count,
         "dgrp": [0.25678] * count,
+        "ngrpr": [30.123] * count,
         "PER": [12.3456] * count,
         "divr": [None] * count,
         "perf": [10.125] * count,
@@ -58,7 +59,7 @@ class QuarterlyValuationCliTests(TestCase):
         result = CliRunner().invoke(app, ["quarterly-valuation", "--valuation-date", "2026-09-19"])
         self.assertEqual(result.exit_code, 0, result.exception)
         self.assertEqual(result.stdout.splitlines()[1].split(), [
-            "1001", "試験銘柄", "2026-06-30", "2026-07-20", "120", "10", "8.33%", "20.00%", "10.00%", "12.00", "3.33", "null", "null",
+            "1001", "試験銘柄", "2026-06-30", "2026-07-20", "120", "10", "8.33%", "20.00%", "10.00%", "null", "12.00", "3.33", "null", "null",
         ])
         self.assertEqual(load.call_count, 5)
         result = CliRunner().invoke(app, ["quarterly-valuation", "--valuation-date", "2026-09-19",
@@ -108,6 +109,27 @@ class QuarterlyValuationCliTests(TestCase):
         self.assertEqual(result.exit_code, 0, result.exception)
         self.assertEqual(result.stdout.splitlines()[0].split()[-2:], ["perf", "bm"])
         self.assertEqual(result.stdout.splitlines()[1].split()[-2:], ["20.00%", "10.00%"])
+        data["reviced_pricelist.parquet"] = pl.concat([
+            data["reviced_pricelist.parquet"],
+            pl.DataFrame({"code": [1001], "date": [date(2026, 10, 16)],
+                          "open": [150.], "close": [150.]}),
+        ])
+        data["nh225.parquet"] = pl.concat([
+            data["nh225.parquet"],
+            pl.DataFrame({"p_key": [date(2026, 10, 16)], "p_open": [250.]}),
+        ])
+        for mode, expected in [
+            ("quarter", ["20.00%", "10.00%"]),
+            ("announcement", ["-20.00%", "-12.00%"]),
+        ]:
+            with self.subTest(perf_period=mode):
+                result = CliRunner().invoke(app, [
+                    "quarterly-valuation", "--valuation-date", "2026-09-19",
+                    "--perf-period", mode, "--sort-columns", "perf",
+                ])
+                self.assertEqual(result.exit_code, 0, result.exception)
+                self.assertEqual(result.stdout.splitlines()[1].split()[-2:], expected)
+
 
     @patch("wequant.cli.quarterly_valuation_flow")
     def test_defaults_and_full_output(self, flow):
@@ -119,6 +141,7 @@ class QuarterlyValuationCliTests(TestCase):
         self.assertEqual(flow.call_args.kwargs["sort_columns"], ["dgrp"])
         self.assertEqual(flow.call_args.kwargs["sort_order"], "desc")
         self.assertEqual(flow.call_args.kwargs["codes"], "all")
+        self.assertEqual(flow.call_args.kwargs["perf_period"], "quarter")
         lines = result.stdout.splitlines()
         self.assertEqual(len(lines), 31)
         self.assertEqual(lines[0].split(), list(OUTPUT_COLUMNS))
@@ -136,6 +159,7 @@ class QuarterlyValuationCliTests(TestCase):
             pl.Series("pr", [19.87654, -10.5, 0.0, None]),
             pl.Series("grsl", [0.27, -10.5, 0.0, None]),
             pl.Series("dgrp", [0.25, -0.125, 0.0, None]),
+            pl.Series("ngrpr", [30.123, -20.5, 0.0, None]),
             pl.Series("perf", [20.125, -10.5, 0.0, None]),
             pl.Series("bm", [20.125, -10.5, 0.0, None]),
         )
@@ -152,6 +176,8 @@ class QuarterlyValuationCliTests(TestCase):
         ])
         self.assertEqual([line.split()[-1] for line in result.stdout.splitlines()[1:]],
                          ["20.12%", "-10.50%", "0.00%", "null"])
+        self.assertEqual([line.split()[9] for line in result.stdout.splitlines()[1:]],
+                         ["30.12%", "-20.50%", "0.00%", "null"])
         self.assertTrue(frame.equals(before))
 
     @patch("wequant.cli.quarterly_valuation_flow")
@@ -165,7 +191,7 @@ class QuarterlyValuationCliTests(TestCase):
         self.assertEqual(result.exit_code, 0, result.exception)
         flow.assert_called_once_with(
             valuation_date=date(2026, 9, 19), sort_columns=["dgrp", "grsl"], sort_order="asc", codes=[7203, 6758],
-            sls_min=None, sls_max=None, grsl_min=None, grsl_max=None, portfolio=False, start_row=1, end_row=None, profit="operating", profit_min=None, profit_max=None,
+            sls_min=None, sls_max=None, grsl_min=None, grsl_max=None, portfolio=False, start_row=1, end_row=None, profit="operating", profit_min=None, profit_max=None, dgrp_min=None, dgrp_max=None, perf_period="quarter", pr_min=None, pr_max=None,
         )
 
     @patch("wequant.cli.quarterly_valuation_flow")
@@ -174,14 +200,19 @@ class QuarterlyValuationCliTests(TestCase):
             ["--valuation-date", "2026-02-30"],
             ["--sort-order", "ask"],
             ["--profit", "invalid"],
+            ["--perf-period", "invalid"],
             ["--dgrp-profit", "ordinary"],
             ["--sort-columns", "ordp"],
             ["--start-row", "0"],
             ["--end-row", "-1"],
             ["--start-row", "3", "--end-row", "2"],
             ["--sls-min", "invalid"],
+            ["--pr-min", "invalid"],
+            ["--pr-max", "invalid"],
             ["--profit-min", "invalid"],
             ["--profit-max", "invalid"],
+            ["--dgrp-min", "invalid"],
+            ["--dgrp-max", "invalid"],
             ["--codes", "all", "--codes", "7203"],
             ["--codes", "invalid"],
             ["--sort-columns", "unknown"],
@@ -193,11 +224,19 @@ class QuarterlyValuationCliTests(TestCase):
         flow.assert_not_called()
 
     @patch("wequant.cli.quarterly_valuation_flow")
+    def test_sort_by_ngrpr(self, flow):
+        flow.return_value = output_frame()
+        result = CliRunner().invoke(app, ["quarterly-valuation", "--sort-columns", "ngrpr"])
+        self.assertEqual(result.exit_code, 0, result.exception)
+        self.assertEqual(flow.call_args.kwargs["sort_columns"], ["ngrpr"])
+
+    @patch("wequant.cli.quarterly_valuation_flow")
     def test_explicit_all(self, flow):
         flow.return_value = output_frame()
         result = CliRunner().invoke(app, ["quarterly-valuation", "--codes", "all"])
         self.assertEqual(result.exit_code, 0, result.exception)
         self.assertEqual(flow.call_args.kwargs["codes"], "all")
+        self.assertEqual(flow.call_args.kwargs["perf_period"], "quarter")
 
     @patch("wequant.cli.quarterly_valuation_flow")
     def test_range_options(self, flow):
@@ -206,10 +245,12 @@ class QuarterlyValuationCliTests(TestCase):
             "quarterly-valuation", "--sls-min", "100", "--sls-max", "200.5",
             "--grsl-min", "-10", "--grsl-max", "50", "--codes", "7203",
             "--profit-min", "-20.5", "--profit-max", "100",
+            "--dgrp-min", "-10", "--dgrp-max", "30",
+            "--pr-min", "-5.5", "--pr-max", "20",
         ])
         self.assertEqual(result.exit_code, 0, result.exception)
         for key, value in {"sls_min": 100.0, "sls_max": 200.5, "grsl_min": -10.0,
-                           "grsl_max": 50.0, "codes": [7203], "profit_min": -20.5, "profit_max": 100.0}.items():
+                           "grsl_max": 50.0, "codes": [7203], "profit_min": -20.5, "profit_max": 100.0, "dgrp_min": -10.0, "dgrp_max": 30.0, "pr_min": -5.5, "pr_max": 20.0}.items():
             self.assertEqual(flow.call_args.kwargs[key], value)
 
     @patch("wequant.cli.quarterly_valuation_flow")
@@ -242,13 +283,13 @@ class QuarterlyValuationFlowTests(TestCase):
         load.return_value = (object(), object(), object(), object(), object())
         expected = build.return_value = output_frame()
         result = quarterly_valuation_flow(date(2026, 9, 19), ["grsl"], "asc", codes=[7203],
-                                          sls_min=100, sls_max=200, grsl_min=-10, grsl_max=50, start_row=2, end_row=5, profit="ordinary", profit_min=-20.5, profit_max=100)
+                                          sls_min=100, sls_max=200, grsl_min=-10, grsl_max=50, start_row=2, end_row=5, profit="ordinary", profit_min=-20.5, profit_max=100, dgrp_min=-10, dgrp_max=30, perf_period="announcement", pr_min=-5, pr_max=20)
         self.assertIs(result, expected)
         load.assert_called_once_with()
         build.assert_called_once_with(
             *load.return_value, valuation_date=date(2026, 9, 19),
             sort_columns=["grsl"], sort_order="asc", codes=[7203],
-            sls_min=100, sls_max=200, grsl_min=-10, grsl_max=50, start_row=2, end_row=5, profit="ordinary", profit_min=-20.5, profit_max=100,
+            sls_min=100, sls_max=200, grsl_min=-10, grsl_max=50, start_row=2, end_row=5, profit="ordinary", profit_min=-20.5, profit_max=100, dgrp_min=-10, dgrp_max=30, perf_period="announcement", pr_min=-5, pr_max=20,
         )
 
     @patch("wequant.tasks.quarterly_valuation.IndexPricelistPl.from_file")

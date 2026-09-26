@@ -40,6 +40,11 @@ class ProfitType(str, Enum):
     ordinary = "ordinary"
 
 
+class PerfPeriod(str, Enum):
+    quarter = "quarter"
+    announcement = "announcement"
+
+
 class SortOrder(str, Enum):
     asc = "asc"
     desc = "desc"
@@ -67,9 +72,17 @@ def quarterly_valuation(
     portfolio: Annotated[bool, typer.Option("--portfolio", help="評価日以前の最新ポートフォリオの個別株に絞る。")] = False,
     start_row: Annotated[int, typer.Option(min=1, help="抽出・ソート後の開始行（1始まり）。")] = 1,
     end_row: Annotated[int | None, typer.Option(min=1, help="終了行（含む）。省略時は末尾まで。")] = None,
-    profit: Annotated[ProfitType, typer.Option(help="prft・pr・dgrpの利益種別：operating=営業利益、ordinary=経常利益。")] = ProfitType.operating,
+    profit: Annotated[ProfitType, typer.Option(help="prft・pr・dgrp・ngrprの利益種別：operating=営業利益、ordinary=経常利益。")] = ProfitType.operating,
     profit_min: Annotated[float | None, typer.Option(help="--profitで選んだ利益の下限（出力と同じ単位、境界を含む）。")] = None,
     profit_max: Annotated[float | None, typer.Option(help="--profitで選んだ利益の上限（出力と同じ単位、境界を含む）。")] = None,
+    dgrp_min: Annotated[float | None, typer.Option(help="dgrpの下限（%）（境界を含む）。")] = None,
+    dgrp_max: Annotated[float | None, typer.Option(help="dgrpの上限（%）（境界を含む）。")] = None,
+    perf_period: Annotated[
+        PerfPeriod,
+        typer.Option(help="perf・bmの期間：quarter=今回発表翌取引日→次回発表翌取引日、announcement=次回発表当日→翌取引日（始値）。"),
+    ] = PerfPeriod.quarter,
+    pr_min: Annotated[float | None, typer.Option(help="利益率prの下限（%、境界を含む）。")] = None,
+    pr_max: Annotated[float | None, typer.Option(help="利益率prの上限（%、境界を含む）。")] = None,
 ):
     """四半期ベースの銘柄評価一覧を表示する。"""
     if end_row is not None and start_row > end_row:
@@ -103,8 +116,13 @@ def quarterly_valuation(
         start_row=start_row,
         end_row=end_row,
         profit=profit.value,
+        pr_min=pr_min,
+        pr_max=pr_max,
         profit_min=profit_min,
         profit_max=profit_max,
+        dgrp_min=dgrp_min,
+        dgrp_max=dgrp_max,
+        perf_period=perf_period.value,
     )
 
     # 端末幅・Polarsの表示設定に依存せず、すべての行と列を表示する。
@@ -116,7 +134,7 @@ def quarterly_valuation(
             return f"{rounded:,f}"
         if column == "dgrp":
             return f"{value * 100:.2f}%"
-        if column in ("grsl", "pr", "perf", "bm"):
+        if column in ("grsl", "pr", "ngrpr", "perf", "bm"):
             return f"{value:.2f}%"
         if column in ("PER", "divr"):
             return f"{value:.2f}"

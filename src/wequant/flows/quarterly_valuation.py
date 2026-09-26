@@ -27,6 +27,11 @@ def quarterly_valuation_flow(
     profit: Literal["operating", "ordinary"] = "operating",
     profit_min: float | None = None,
     profit_max: float | None = None,
+    dgrp_min: float | None = None,
+    dgrp_max: float | None = None,
+    perf_period: Literal["quarter", "announcement"] = "quarter",
+    pr_min: float | None = None,
+    pr_max: float | None = None,
 ) -> pl.DataFrame:
     """評価日省略時は呼び出し時の今日を使い、評価一覧を返す。
 
@@ -54,6 +59,11 @@ def quarterly_valuation_flow(
         start_row=start_row,
         end_row=end_row,
         profit=profit,
+        pr_min=pr_min,
+        pr_max=pr_max,
         profit_min=profit_min,
         profit_max=profit_max,
+        dgrp_min=dgrp_min,
+        dgrp_max=dgrp_max,
+        perf_period=perf_period,
     )

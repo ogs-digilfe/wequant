@@ -115,7 +115,8 @@ uv run wq quarterly-valuation --valuation-date 2026-09-19 \
 | --- | --- | --- |
 | `--valuation-date` | 実行日の今日 | 評価日。`YYYY-MM-DD`形式 |
 | `--sort-columns` | `dgrp` | 出力列名。複数指定時はオプションを繰り返し、指定順に優先 |
-| `--profit` | `operating` | `prft`・`pr`・`dgrp`の利益種別。`operating`=営業利益、`ordinary`=経常利益 |
+| `--perf-period` | `quarter` | `perf`・`bm`の期間。`quarter`=今回発表翌取引日→次回発表翌取引日、`announcement`=次回発表当日→翌取引日（始値） |
+| `--profit` | `operating` | `prft`・`pr`・`dgrp`・`ngrpr`の利益種別。`operating`=営業利益、`ordinary`=経常利益 |
 | `--sort-order` | `desc` | 指定した全列に共通の降順`desc`または昇順`asc` |
 | `--codes` | `all` | 全銘柄、または整数の銘柄コード。複数銘柄はオプションを繰り返す |
 | `--portfolio` | 無効 | 評価日以前の最新ポートフォリオの個別株に絞る |
@@ -123,6 +124,8 @@ uv run wq quarterly-valuation --valuation-date 2026-09-19 \
 | `--end-row` | 末尾まで | 終了行（指定行を含む） |
 | `--sls-min` / `--sls-max` | 制限なし | 売上高の下限 / 上限（出力と同じ単位） |
 | `--profit-min` / `--profit-max` | 制限なし | `--profit`で選んだ利益の下限 / 上限（出力と同じ単位） |
+| `--pr-min` / `--pr-max` | 制限なし | `--profit`で選んだ利益率`pr`の下限 / 上限（%単位） |
+| `--dgrp-min` / `--dgrp-max` | 制限なし | `dgrp`の下限 / 上限（表示と同じ%単位） |
 | `--grsl-min` / `--grsl-max` | 制限なし | 売上成長率の下限 / 上限（%単位） |
 
 範囲フィルタは境界値を含み、指定されたすべての条件を満たす行を表示します。
@@ -133,12 +136,19 @@ uv run wq quarterly-valuation --valuation-date 2026-09-19 \
 ```bash
 # 売上高10000以上、売上成長率10%以上50%以下
 uv run wq quarterly-valuation --sls-min 10000 --grsl-min 10 --grsl-max 50
+# 利益率が5%以上20%以下（片側だけの指定も可能）
+uv run wq quarterly-valuation --pr-min 5 --pr-max 20
+# dgrpが10%以上30%以下
+uv run wq quarterly-valuation --dgrp-min 10 --dgrp-max 30
 # 経常利益1000以上5000以下（営業利益の場合は --profit operating）
 uv run wq quarterly-valuation --profit ordinary --profit-min 1000 --profit-max 5000
 ```
 
 Pythonのflow・加工taskには`sls_min`、`sls_max`、`grsl_min`、`grsl_max`、
-`profit_min`、`profit_max`を渡せます。利益の上下限は`profit`で選んだ`prft`列に適用します。
+`profit_min`、`profit_max`、`dgrp_min`、`dgrp_max`、`pr_min`、`pr_max`を渡せます。利益の上下限は`profit`で選んだ`prft`列に適用します。
+`dgrp_min`・`dgrp_max`はPythonでも%単位です（25は内部値0.25に対応）。
+`--profit`で選んだ利益に基づく`dgrp`へ適用し、表示前の値で比較します。
+`pr_min`・`pr_max`はPythonでも%単位で、`profit`で選んだ利益率`pr`に適用します。
 各引数は`float | None = None`で、`None`は制限なしです。
 
 
@@ -156,14 +166,14 @@ Pythonのflow・加工taskでは`codes: Literal["all"] | list[int] = "all"`を�
 不明な列名と列の重複指定はエラーにします。行・列を省略せず表示し、
 `sls`・`prft`は表示時に整数へ四捨五入し、3桁区切りのカンマを付けます
 （例：`169927.0` → `169,927`。負数の端数0.5も絶対値を切り上げます）。
-`pr`・`grsl`・`dgrp`・`perf`・`bm`は小数点以下2桁と`%`を表示します。`pr`・`grsl`・`perf`・`bm`は既に%単位のため値をそのまま、
+`pr`・`grsl`・`dgrp`・`ngrpr`・`perf`・`bm`は小数点以下2桁と`%`を表示します。`pr`・`grsl`・`ngrpr`・`perf`・`bm`は既に%単位のため値をそのまま、
 `dgrp`は表示時だけ100倍します（内部値`0.25` → `25.00%`）。
 `PER`・`divr`は従来どおり小数点以下2桁、nullは`null`と表示します。
 内部値・ソート・フィルタは表示の丸めや変換の影響を受けません。
 
 ### 利益種別
 
-既定では営業利益（`operating_income`）を使用し、`prft`・`pr`・`dgrp`に適用します。
+既定では営業利益（`operating_income`）を使用し、`prft`・`pr`・`dgrp`・`ngrpr`に適用します。
 従来の経常利益（`ordinary_profit`）による計算は明示指定できます。
 
 ```bash
@@ -212,7 +222,7 @@ uv run wq quarterly-valuation --portfolio --codes 5334 --codes 7203
 `--codes`と併用した場合は共通する銘柄だけを表示します。`--codes all`や省略時も、
 `--portfolio`指定中は保有銘柄に限定されます。既存の決算条件（評価日前93日以内の発表）と
 `sls`・`grsl`フィルタはそのまま適用され、条件を満たす決算がない保有銘柄は表示しません。
-出力は13列・1銘柄1行を維持します。対象ポートフォリオや対象銘柄がない場合は
+出力は14列・1銘柄1行を維持します。対象ポートフォリオや対象銘柄がない場合は
 見出しのみ表示し、全銘柄表示には戻りません。
 
 Pythonでは`quarterly_valuation_flow(..., portfolio=True)`を使用します。
@@ -231,9 +241,10 @@ Pythonでは`quarterly_valuation_flow(..., portfolio=True)`を使用します。
 | `pr` | `prft / sls × 100`（%、小数点以下2桁で表示） |
 | `grsl` | `(売上高 / 前年同期売上高 - 1) × 100`（%） |
 | `dgrp` | `(選択した利益 - 前年同期の同じ利益) / (売上高 - 前年同期売上高)`（内部値は倍率、表示時に100倍して%表記） |
+| `ngrpr` | 次四半期の予測利益成長率（%、小数点以下2桁で表示） |
 | `PER` | 株価比率で補正した予想PER（倍） |
 | `divr` | 株価比率で補正した予想配当利回り（%） |
-| `perf` | 今回発表翌取引日の始値から次回発表翌取引日の始値までの騰落率（%） |
+| `perf` | `--perf-period`で選択した期間の始値による騰落率（%） |
 | `bm` | `perf`と同じ開始日・終了日のnh225の始値による騰落率（%） |
 
 `pr`は当期売上が正で、売上・選択利益・計算結果が有限の場合に算出します。
@@ -247,16 +258,50 @@ Pythonでは`quarterly_valuation_flow(..., portfolio=True)`を使用します。
 前年データも評価日前の発表に限り、93日間の抽出前の履歴から取得します。
 既存の`KessanPl`初期化時の日付補正と古い行の除外は適用されます。
 
+### 次四半期の予測利益成長率（ngrpr）
+
+前年同期売上高を`lsls`とし、既存の`grsl = (sls / lsls - 1) × 100`を使用します。
+前年同期から3か月後の四半期単体決算の売上高を`nlsls`、
+`--profit`で選んだ利益を`nlprofit`として計算します。
+例えば最新決算が2026年6月期なら、2025年9月期の売上高・利益を使用します。
+年をまたぐ場合も同様で、最新が2026年12月期なら2026年3月期です。
+対象年月が欠落していても別の期で補完しません。
+評価日より前に発表された履歴から、対象年月の最新決算期・最新訂正を使用します。
+
+```text
+nsls    = nlsls × (1 + grsl / 100)
+nprofit = nlprofit + (nsls - nlsls) × dgrp
+ngrpr   = (nprofit - nlprofit) / nlprofit × 100
+```
+
+`dgrp`は表示前の倍率を使用します。`ngrpr`は%単位で保持し、丸め前の値で
+`--sort-columns ngrpr`によるソートができます。表示位置は`dgrp`の右隣です。
+`grsl`・`dgrp`が計算できない場合、対象データの欠損・非有限値、`nlprofit = 0`、
+途中の計算や結果が非有限値の場合はnullとし、銘柄の行は残します。
+`nlprofit`が負でも式どおり計算し、結果の負値・0も保持します。
+
 ### 決算発表間の株価騰落率（perf）
 
-`perf = (次回発表翌取引日の始値 / 今回発表翌取引日の始値 - 1) × 100`です。
+`--perf-period`で計算期間を選択します。省略時は`quarter`です。
+
+- `quarter`: `perf = (次回発表翌取引日の始値 / 今回発表翌取引日の始値 - 1) × 100`
+- `announcement`: `perf = (次回発表翌取引日の始値 / 次回発表当日の始値 - 1) × 100`
+
+`announcement`は同じ次回発表の当日と翌取引日を比較します。場中・引け後の発表を
+区別せず、当日の株価は日付の完全一致で取得します。休場日や当日データ欠損時はnullで、
+前後の日には置き換えません。`bm`も選択した期間に連動します。
+
+```bash
+uv run wq quarterly-valuation --perf-period announcement
+```
+
 起点は出力の`annd`で、評価日当日の発表は従来どおり起点に含めません。
 次回は、同じ銘柄の次の決算期の四半期実績（`settlement_type == "四"`）の
 最初の発表を使います。同一期の訂正発表は次回に含めません。
 次回発表と株価の探索には評価日より後のデータも使用します。
 
 始値は`reviced_pricelist.parquet`の分割調整済み`open`を使い、銘柄ごとに
-各発表日より後の最初の取引日を選びます。発表日当日の株価は使いません。
+翌取引日には各発表日より後の最初の取引日を選びます（暦上の翌営業日ではなく、株価データ上の取引日）。
 次回発表や必要な株価がない場合、始値がnull・0以下・非有限値の場合はnullです。
 最初の取引日の始値が無効でも、さらに後日の始値には置き換えません。
 内部値は%単位で保持し、表示時に小数点以下2桁へ丸めて`%`を付けます。

@@ -111,6 +111,91 @@ class QuarterlyCalculationTests(TestCase):
             self.assertEqual(result.columns, [c for c in OUTPUT_COLUMNS if c not in ("name", "PER", "divr", "perf", "bm")])
 
 
+class NextQuarterGrowthTests(TestCase):
+    def test_formula_selected_profit_and_state(self):
+        source = kessan([
+            settlement(1, 2025, 100, 10),
+            settlement(1, 2025, 200, 40, month=9),
+            settlement(1, 2026, 120, 15),
+        ])
+        source.df = source.df.with_columns(pl.Series("operating_income", [8., 20., 10.]))
+        before = source.df.clone()
+        for mode, expected in [("operating", 20), ("ordinary", 25)]:
+            with self.subTest(profit=mode):
+                result = source.get_quarterly_valuation(VALUATION_DATE, profit=mode)
+                self.assertAlmostEqual(result["ngrpr"][0], expected)
+                self.assertEqual(result.schema["ngrpr"], pl.Float64)
+        assert_frame_equal(source.df, before)
+
+    def test_year_boundary_latest_revision_and_announcement_cutoff(self):
+        evaluation = date(2027, 2, 20)
+        rows = [
+            settlement(1, 2025, 100, 10, month=12, announced=date(2026, 1, 20)),
+            settlement(1, 2026, 120, 15, month=12, announced=date(2027, 1, 20)),
+            settlement(1, 2026, 100, 10, month=3),
+            settlement(1, 2026, 200, 40, month=3, announced=date(2026, 5, 1)),
+            settlement(1, 2026, 999, 1, month=3, announced=evaluation),
+            settlement(1, 2026, 999, 1, month=3, announced=evaluation + timedelta(days=1)),
+            settlement(1, 2026, 999, 1, month=3, announced=date(2026, 6, 1), kind="予"),
+        ]
+        result = kessan(list(reversed(rows))).get_quarterly_valuation(evaluation)
+        self.assertAlmostEqual(result["ngrpr"][0], 25)
+
+    def test_missing_exact_quarter_and_invalid_inputs(self):
+        cases = [
+            # 次四半期前年売上・利益、当期売上・利益、期待値
+            (200, 40, 120, 15, 25),
+            (200, -40, 120, 15, -25),
+            (200, 40, 120, 10, 0),
+            (200, 40, 80, 5, -25),
+            (200, 0, 120, 15, None),
+            (None, 40, 120, 15, None),
+            (200, None, 120, 15, None),
+            (float("inf"), 40, 120, 15, None),
+            (200, float("nan"), 120, 15, None),
+            (200, float("inf"), 120, 15, None),
+            (200, 40, 100, 15, None),
+            (200, 40, 120, -5, None),
+            (200, 40, None, 15, None),
+            (1e308, 40, 200, 15, None),
+        ]
+        rows = []
+        for code, (sales, profit, current_sales, current_profit, _) in enumerate(cases):
+            rows.extend([
+                settlement(code, 2025, 100, 10),
+                settlement(code, 2025, sales, profit, month=9),
+                settlement(code, 2026, current_sales, current_profit),
+            ])
+        # 翌々四半期だけあっても使わず、別銘柄の対象四半期も使わない。
+        rows.extend([
+            settlement(99, 2025, 100, 10), settlement(99, 2026, 120, 15),
+            settlement(99, 2025, 200, 40, month=12, announced=date(2026, 1, 20)),
+            settlement(99, 2025, 200, 40, month=9, announced=VALUATION_DATE),
+        ])
+        result = kessan(list(reversed(rows))).get_quarterly_valuation(VALUATION_DATE)
+        for actual, case in zip(result["ngrpr"], cases):
+            with self.subTest(case=case):
+                if case[-1] is None:
+                    self.assertIsNone(actual)
+                else:
+                    self.assertAlmostEqual(actual, case[-1])
+        self.assertIsNone(result["ngrpr"][-1])
+
+    def test_sort_growth_null_last(self):
+        rows = []
+        for code, profit in [(1, 40), (2, 20), (3, None)]:
+            rows.extend([settlement(code, 2025, 100, 10),
+                         settlement(code, 2025, 200, profit, month=9),
+                         settlement(code, 2026, 120, 15)])
+        names = MeigaralistPl(pl.DataFrame(schema={"code": pl.Int64, "name": pl.String}))
+        for order, expected in [("asc", [1, 2, 3]), ("desc", [2, 1, 3])]:
+            result = build_quarterly_valuation(
+                kessan(rows), quotes([]), prices([]), names, valuation_date=VALUATION_DATE,
+                sort_columns=["ngrpr"], sort_order=order,
+            )
+            self.assertEqual(result["code"].to_list(), expected)
+
+
 class PriceAdjustmentTests(TestCase):
     def test_per_code_latest_and_exact_base_price(self):
         source = quotes([
@@ -261,6 +346,48 @@ class QuarterlyBuildTests(TestCase):
                 self.assertEqual(result.columns, list(OUTPUT_COLUMNS))
         assert_frame_equal(source.df, before)
 
+    def test_dgrp_percent_ranges_before_rounding_sort_and_slice(self):
+        rows = []
+        for code, current_profit in [(1, 15), (2, 20), (3, 5), (4, 10), (5, None), (6, 15.0004)]:
+            rows.extend([settlement(code, 2025, 100, 10),
+                         settlement(code, 2026, 120, current_profit)])
+        # 条件を満たす古い決算へ戻らない。
+        rows.extend([settlement(7, 2025, 100, 10),
+                     settlement(7, 2026, 120, 15),
+                     settlement(7, 2026, 120, 20, announced=date(2026, 8, 1))])
+        source = kessan(rows)
+        source.df = source.df.with_columns((pl.col("ordinary_profit") * 2).alias("operating_income"))
+        before = source.df.clone()
+        names = MeigaralistPl(pl.DataFrame(schema={"code": pl.Int64, "name": pl.String}))
+        cases = [
+            ({}, [1, 2, 3, 4, 5, 6, 7]),
+            ({"dgrp_min": 25}, [1, 2, 6, 7]),
+            ({"dgrp_max": 25}, [1, 3, 4]),
+            ({"dgrp_min": 25, "dgrp_max": 25}, [1]),
+            ({"dgrp_min": -25, "dgrp_max": 0}, [3, 4]),
+            ({"dgrp_min": 0, "dgrp_max": 0}, [4]),
+            ({"dgrp_min": 30, "dgrp_max": 10}, []),
+            ({"dgrp_min": 25, "dgrp_max": 50, "codes": [1, 2, 3],
+              "grsl_min": 10, "sls_min": 120, "profit_min": 16}, [2]),
+            ({"dgrp_min": 25, "sort_columns": ["dgrp"], "sort_order": "desc",
+              "start_row": 2, "end_row": 3}, [7, 6]),
+        ]
+        for mode, factor in [("ordinary", 1), ("operating", 2)]:
+            for options, expected in cases:
+                options = dict(options)
+                for key in ("dgrp_min", "dgrp_max", "profit_min"):
+                    if key in options:
+                        options[key] *= factor
+                options.setdefault("sort_columns", ["code"])
+                options.setdefault("sort_order", "asc")
+                with self.subTest(profit=mode, options=options):
+                    result = build_quarterly_valuation(
+                        source, quotes([]), prices([]), names, valuation_date=VALUATION_DATE,
+                        profit=mode, **options,
+                    )
+                    self.assertEqual(result["code"].to_list(), expected)
+        assert_frame_equal(source.df, before)
+
     def test_profit_ranges_use_selected_profit_before_rounding_and_row_slice(self):
         source = kessan([
             settlement(1, 2026, 100, 10),
@@ -303,6 +430,49 @@ class QuarterlyBuildTests(TestCase):
                     )
                     self.assertEqual(result["code"].to_list(), expected)
                     self.assertEqual(result.columns, list(OUTPUT_COLUMNS))
+        assert_frame_equal(source.df, before)
+
+    def test_pr_ranges_use_selected_profit_before_rounding_and_slice(self):
+        source = kessan([
+            settlement(1, 2026, 100, 5),
+            settlement(2, 2026, 100, 20),
+            settlement(3, 2026, 100, None),
+            settlement(4, 2026, 100, -5),
+            settlement(5, 2026, 100, 0),
+            settlement(6, 2026, 100, 20.0004),
+            settlement(7, 2026, 100, 10, month=3, announced=date(2026, 7, 1)),
+            settlement(7, 2026, 100, 30),
+        ])
+        source.df = source.df.with_columns(
+            (pl.col("ordinary_profit") * 2).alias("operating_income")
+        )
+        before = source.df.clone()
+        names = MeigaralistPl(pl.DataFrame(schema={"code": pl.Int64, "name": pl.String}))
+        cases = [
+            ({}, [1, 2, 3, 4, 5, 6, 7]),
+            ({"pr_min": 5, "pr_max": 20}, [1, 2]),
+            ({"pr_min": 20}, [2, 6, 7]),
+            ({"pr_max": 20}, [1, 2, 4, 5]),
+            ({"pr_min": -5, "pr_max": 0}, [4, 5]),
+            ({"pr_min": 0, "pr_max": 0}, [5]),
+            ({"pr_min": 20, "pr_max": 20}, [2]),
+            ({"pr_min": 20, "pr_max": 5}, []),
+            ({"pr_min": 5, "pr_max": 20, "codes": [2, 6], "sls_min": 100}, [2]),
+            ({"pr_min": 5, "pr_max": 20, "start_row": 2, "end_row": 2}, [2]),
+        ]
+        for mode, factor in [("ordinary", 1), ("operating", 2)]:
+            for options, expected in cases:
+                options = dict(options)
+                for key in ("pr_min", "pr_max"):
+                    if key in options:
+                        options[key] *= factor
+                with self.subTest(profit=mode, options=options):
+                    result = build_quarterly_valuation(
+                        source, quotes([]), prices([]), names,
+                        valuation_date=VALUATION_DATE, profit=mode,
+                        sort_columns=["code"], sort_order="asc", **options,
+                    )
+                    self.assertEqual(result["code"].to_list(), expected)
         assert_frame_equal(source.df, before)
 
     def test_row_range_after_filter_and_sort(self):
@@ -370,7 +540,7 @@ class QuarterlyBuildTests(TestCase):
         before = source.df.clone()
         for mode in ("operating", "ordinary"):
             result = source.get_quarterly_valuation(VALUATION_DATE, profit=mode)
-            self.assertEqual(result.columns, ["code", "setd", "annd", "sls", "prft", "pr", "grsl", "dgrp"])
+            self.assertEqual(result.columns, ["code", "setd", "annd", "sls", "prft", "pr", "grsl", "dgrp", "ngrpr"])
             self.assertEqual(result["pr"].to_list(), [expected for _, _, expected in cases])
             self.assertEqual(result["dgrp"].null_count(), len(cases))
         assert_frame_equal(source.df, before)
@@ -548,3 +718,110 @@ class QuarterlyBenchmarkTests(TestCase):
         ])
         with self.assertRaisesRegex(ValueError, "異なる始値"):
             self.source.get_quarterly_performance(self.current, self.prices, conflicting)
+
+
+class AnnouncementPerformanceTests(TestCase):
+    def setUp(self):
+        self.source = kessan([
+            settlement(code, 2026, 100, 10, month=month, announced=announced)
+            for code in (1, 2)
+            for month, announced in (
+                (6, date(2026, 7, 17)),
+                (9, date(2026, 10, 16)),
+                (9, date(2026, 10, 20)),  # 訂正発表を終点にしない。
+            )
+        ])
+        self.current = self.source.get_quarterly_valuation(VALUATION_DATE)
+        self.prices = pl.DataFrame({
+            "code": [1, 1, 1, 1, 2, 2],
+            "date": [date(2026, 10, 15), date(2026, 10, 16),
+                     date(2026, 10, 19), date(2026, 10, 21),
+                     date(2026, 10, 16), date(2026, 10, 20)],
+            "open": [999., 100., 120., 999., 200., 180.],
+        }).reverse()
+        self.index = pl.DataFrame({
+            "date": [date(2026, 10, 16), date(2026, 10, 19), date(2026, 10, 20)],
+            "open": [200., 220., 240.],
+        })
+
+    def calculate(self, prices=None, current=None, index=None):
+        return self.source.get_quarterly_performance(
+            self.current if current is None else current,
+            self.prices if prices is None else prices,
+            self.index if index is None else index,
+            perf_period="announcement",
+        )
+
+    def test_dates_benchmark_and_no_mutation(self):
+        frames = [self.source.df, self.current, self.prices, self.index]
+        before = [frame.clone() for frame in frames]
+        result = self.calculate(prices=pl.concat([self.prices, self.prices]))
+        self.assertEqual(result["code"].to_list(), [1, 2])
+        for actual, expected in zip(result["perf"], [20., -10.]):
+            self.assertAlmostEqual(actual, expected)
+        for actual, expected in zip(result["bm"], [10., 20.]):
+            self.assertAlmostEqual(actual, expected)
+        for actual, expected in zip(frames, before):
+            assert_frame_equal(actual, expected)
+        no_index = self.source.get_quarterly_performance(
+            self.current, self.prices, perf_period="announcement",
+        )
+        self.assertEqual(no_index.columns, ["code", "perf"])
+
+    def test_missing_boundaries_and_empty(self):
+        for boundary in (date(2026, 10, 16), date(2026, 10, 19)):
+            prices = self.prices.filter(
+                ~((pl.col("code") == 1) & (pl.col("date") >= boundary))
+                if boundary == date(2026, 10, 19)
+                else pl.col("date") != boundary
+            )
+            result = self.calculate(prices=prices)
+            self.assertIsNone(result["perf"][0])
+            self.assertIsNone(result["bm"][0])
+        # 休場日発表には前後日の株価を補完しない。
+        no_next = kessan([settlement(1, 2026, 100, 10)])
+        self.assertIsNone(no_next.get_quarterly_performance(
+            self.current.head(1), self.prices, perf_period="announcement",
+        )["perf"][0])
+        source = kessan([
+            settlement(1, 2026, 100, 10),
+            settlement(1, 2026, 100, 10, month=9, announced=date(2026, 10, 17)),
+        ])
+        self.assertIsNone(source.get_quarterly_performance(
+            self.current.head(1), self.prices, perf_period="announcement",
+        )["perf"][0])
+        self.assertEqual(self.calculate(prices=self.prices.clear())["perf"].to_list(), [None, None])
+        empty = self.calculate(current=self.current.clear())
+        self.assertEqual(empty.schema, {"code": pl.Int64, "perf": pl.Float64, "bm": pl.Float64})
+        self.assertEqual(empty.height, 0)
+
+    def test_invalid_opens_do_not_skip_dates(self):
+        for boundary in (date(2026, 10, 16), date(2026, 10, 19)):
+            for value in (None, 0., -1., float("nan"), float("inf")):
+                with self.subTest(boundary=boundary, value=value):
+                    prices = self.prices.with_columns(
+                        pl.when(pl.col("date") == boundary)
+                        .then(pl.lit(value, dtype=pl.Float64))
+                        .otherwise(pl.col("open")).alias("open")
+                    )
+                    result = self.calculate(prices=prices)
+                    self.assertIsNone(result["perf"][0])
+                    self.assertAlmostEqual(result["bm"][0], 10.)
+                    index = self.index.with_columns(
+                        pl.when(pl.col("date") == boundary)
+                        .then(pl.lit(value, dtype=pl.Float64))
+                        .otherwise(pl.col("open")).alias("open")
+                    )
+                    self.assertIsNone(self.calculate(index=index)["bm"][0])
+        missing_index = self.index.filter(pl.col("date") != date(2026, 10, 16))
+        self.assertIsNone(self.calculate(index=missing_index)["bm"][0])
+
+    def test_invalid_period_and_conflicting_prices(self):
+        with self.assertRaisesRegex(ValueError, "perf_period"):
+            self.source.get_quarterly_performance(self.current, self.prices, perf_period="bad")
+        conflicting = pl.concat([
+            self.prices, self.prices.filter(pl.col("date") == date(2026, 10, 16))
+            .with_columns(pl.lit(999.).alias("open")),
+        ])
+        with self.assertRaisesRegex(ValueError, "異なる始値"):
+            self.calculate(prices=conflicting)

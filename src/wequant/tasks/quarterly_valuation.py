@@ -9,7 +9,7 @@ import polars as pl
 from wequant.data_processing import IndexPricelistPl, FinancequotePl, KessanPl, MeigaralistPl, PortfolioManager, PricelistPl
 
 
-OUTPUT_COLUMNS = ("code", "name", "setd", "annd", "sls", "prft", "pr", "grsl", "dgrp", "PER", "divr", "perf", "bm")
+OUTPUT_COLUMNS = ("code", "name", "setd", "annd", "sls", "prft", "pr", "grsl", "dgrp", "ngrpr", "PER", "divr", "perf", "bm")
 
 
 def load_quarterly_valuation_inputs() -> tuple[KessanPl, FinancequotePl, PricelistPl, MeigaralistPl, IndexPricelistPl]:
@@ -62,15 +62,23 @@ def build_quarterly_valuation(
     profit: Literal["operating", "ordinary"] = "operating",
     profit_min: float | None = None,
     profit_max: float | None = None,
+    dgrp_min: float | None = None,
+    dgrp_max: float | None = None,
+    perf_period: Literal["quarter", "announcement"] = "quarter",
+    pr_min: float | None = None,
+    pr_max: float | None = None,
 ) -> pl.DataFrame:
-    """入力を変更せず13列の評価一覧を返す。nullは末尾、同値はcode昇順。
+    """入力を変更せず14列の評価一覧を返す。nullは末尾、同値はcode昇順。
 
+    perf_periodはperf・bmの期間（quarter: 発表間、announcement: 次回発表当日→翌取引日）。
     index_pricesはnh225の指数。省略時はbmをnullにする（既存呼び出し互換）。
     start_row/end_rowは抽出・ソート後の1始まりの範囲（両端を含む）。
     end_row=Noneは末尾まで。範囲が件数を超えた分は切り詰める。
     codes="all"は全銘柄、整数リストは指定銘柄のみ（空リストは0件）。
-    sls/grsl/prftの上下限は境界を含むAND条件。Noneは制限なし。
+    sls/grsl/prft/dgrp/prの上下限は境界を含むAND条件。Noneは制限なし。
     条件を指定した列のnullは除外。sls・prftは元単位、grslは%で丸め前に比較する。
+    dgrp_min/dgrp_maxは%単位。内部倍率へ変換し、丸め前のdgrpと比較する。
+    pr_min/pr_maxはprofitで選んだ利益率（pr）の%単位で、丸め前に比較する。
     profit_min/profit_maxはprofitで選んだ利益（prft）に適用する。
     銘柄名がない行も保持する。同一codeに異なる名前があれば結合エラー。"""
     if start_row < 1 or (end_row is not None and (end_row < 1 or start_row > end_row)):
@@ -91,6 +99,7 @@ def build_quarterly_valuation(
     performance = settlements.get_quarterly_performance(
         quarterly, prices.df,
         index_prices.df if index_prices is not None else None,
+        perf_period=perf_period,
     )
     if index_prices is None:
         performance = performance.with_columns(pl.lit(None, dtype=pl.Float64).alias("bm"))
@@ -104,6 +113,9 @@ def build_quarterly_valuation(
         ("sls", sls_min, sls_max),
         ("grsl", grsl_min, grsl_max),
         ("prft", profit_min, profit_max),
+        ("pr", pr_min, pr_max),
+        ("dgrp", None if dgrp_min is None else dgrp_min / 100,
+         None if dgrp_max is None else dgrp_max / 100),
     ):
         if lower is not None:
             result = result.filter(pl.col(column) >= lower)
