@@ -495,6 +495,10 @@ class FinancequotePl():
             latest.select("code", pl.col("close").alias("latest_close")),
             on="code", how="left", validate="1:1",
         )
+        return self._calculate_price_adjusted_valuations(df, ["code"])
+
+    @staticmethod
+    def _calculate_price_adjusted_valuations(df, keys) -> pl.DataFrame:
         p0 = pl.col("base_close").cast(pl.Float64)
         p1 = pl.col("latest_close").cast(pl.Float64)
         per = pl.col("expected_PER").cast(pl.Float64)
@@ -503,12 +507,42 @@ class FinancequotePl():
         adjusted_per = per * (p1 / p0)
         adjusted_divr = divr * (p0 / p1)
         return df.select(
-            "code",
+            *keys,
             pl.when(valid_prices & (per > 0) & per.is_finite() & adjusted_per.is_finite())
             .then(adjusted_per).otherwise(None).alias("PER"),
             pl.when(valid_prices & (divr >= 0) & divr.is_finite() & adjusted_divr.is_finite())
             .then(adjusted_divr).otherwise(None).alias("divr"),
-        ).sort("code")
+        ).sort(keys)
+
+    def get_price_adjusted_valuations_for_dates(
+        self, prices_df: pl.DataFrame, valuation_dates_df: pl.DataFrame,
+    ) -> pl.DataFrame:
+        """code/setd/valuation_dateごとのPER（倍）・divr（%）を返す。
+
+        日付はDate型、code/setdは一意。評価日より前の最新指標・終値を使用。
+        基準終値は指標と同日。入力・状態を変更せず、丸めない。
+        無効値条件はget_price_adjusted_valuationsと同じ。履歴不足・評価日nullは
+        指標をnullにし、行を保持する。同日異値はエラー。空入力も扱う。
+        """
+        dates = valuation_dates_df.select("code", "setd", "valuation_date")
+        if dates.select("code", "setd").is_duplicated().any():
+            raise ValueError("code/setdは一意にしてください。")
+        quotes = self.df.select("code", "date", "expected_PER", "expected_dividend_yield").unique()
+        prices = prices_df.select("code", "date", "close").unique()
+        for frame in (quotes, prices):
+            if frame.select("code", "date").is_duplicated().any():
+                raise ValueError("同一銘柄・同一日に異なる指標または終値があります。")
+        quotes = quotes.join(prices.rename({"close": "base_close"}), on=["code", "date"], how="left", validate="1:1")
+        df = dates.sort("valuation_date").join_asof(
+            quotes.rename({"date": "quote_date"}).sort("quote_date"),
+            left_on="valuation_date", right_on="quote_date", by="code",
+            strategy="backward", allow_exact_matches=False, check_sortedness=False,
+        ).join_asof(
+            prices.rename({"date": "price_date", "close": "latest_close"}).sort("price_date"),
+            left_on="valuation_date", right_on="price_date", by="code",
+            strategy="backward", allow_exact_matches=False, check_sortedness=False,
+        )
+        return self._calculate_price_adjusted_valuations(df, ["code", "setd"])
 
     def filter_finance_quotes_by_date(
         self,
@@ -1310,12 +1344,13 @@ class KessanPl():
         評価日当日以降の発表を除き、93日前を含む。銘柄ごとに決算期末日、発表日の
         順で最新行を選ぶ。前年同月も評価日前の履歴から同じ順で最新行を選ぶ。
         同一銘柄・期末日・発表日の異なる値はValueError、完全一致行はまとめる。
-        戻り値はcode/setd/annd/sls/prft/pr/grsl/dgrp/ngrpr。金額の単位は入力のまま、
+        戻り値はcode/setd/annd/qtr/sls/prft/pr/grsl/dgrp/ngrpr。金額の単位は入力のまま、
         grslは売上成長率（%）、dgrpは選択した利益の前年差/売上高前年差（100倍しない）。
         当期・前年の売上が正の場合だけgrslを計算。dgrpはさらに両期の選択した利益が
         正で売上高前年差が0でない場合だけ計算する。計算結果の負値・0は保持。
         欠損・非有限値・比較先なしは該当指標をnullにし、行を残す。丸めない。
         profitはoperating（営業利益、既定）またはordinary（経常利益）。
+        qtrは入力のquater列（決算年度の四半期番号）をそのまま返す。nullも保持する。
         prft列は選択した利益、pr列はprft/sls*100（%）を返す。
         prは当期売上が正で売上・利益・計算結果が有限の場合に計算し、赤字・0も保持。
         それ以外はnullとする。前年データは不要。
@@ -1332,7 +1367,7 @@ class KessanPl():
         valuation_date = date.today() if valuation_date is None else valuation_date
         history = self.df.filter(
             (pl.col("settlement_type") == "四") & (pl.col("announcement_date") < valuation_date)
-        ).select("code", "settlement_date", "announcement_date", "sales",
+        ).select("code", "settlement_date", "announcement_date", "quater", "sales",
                  pl.col(profit_column).alias("selected_profit"))
         history = history.filter(
             pl.col("announcement_date")
@@ -1362,6 +1397,63 @@ class KessanPl():
             pl.col("selected_profit").alias("next_previous_profit"),
         )
         df = df.join(next_previous, on=["code", "year", "month"], how="left", validate="m:1")
+        return self._calculate_quarterly_valuation(df)
+
+    def get_quarterly_valuation_dataset(
+        self, pricelist_df: pl.DataFrame, *,
+        profit: Literal["operating", "ordinary"] = "operating",
+    ) -> pl.DataFrame:
+        """初回発表の全四半期指標とvaluation_dateを返す。状態変更なし。
+
+        決算の必須列・単位・無効値条件はget_quarterly_valuationと同じ。
+        pricelist_dfのcode/date（Date型）から発表後最初の取引日を評価日にする。
+        比較先は前年同月・9か月前同月で、評価日前に判明した最新訂正を使う。
+        当期はcode/settlement_dateごとの初回発表。同日異値はエラー。
+        評価日がない行の比較指標はnull。空入力を含めcode/setd順で返す。
+        """
+        if profit not in ("operating", "ordinary"):
+            raise ValueError("profitはoperatingまたはordinaryを指定してください。")
+        profit_column = "operating_income" if profit == "operating" else "ordinary_profit"
+        history = self.df.filter(pl.col("settlement_type") == "四").select(
+            "code", "settlement_date", "announcement_date", "quater", "sales",
+            pl.col(profit_column).alias("selected_profit"),
+        ).unique()
+        if history.select("code", "settlement_date", "announcement_date").is_duplicated().any():
+            raise ValueError("同一銘柄・決算期・発表日に異なる決算値があります。")
+        current = history.sort(["code", "settlement_date", "announcement_date"]).unique(
+            subset=["code", "settlement_date"], keep="first", maintain_order=True,
+        ).with_row_index("_row")
+        current = current.sort("announcement_date").join_asof(
+            pricelist_df.select("code", pl.col("date").alias("valuation_date")).unique().sort("valuation_date"),
+            left_on="announcement_date", right_on="valuation_date", by="code",
+            strategy="forward", allow_exact_matches=False, check_sortedness=False,
+        )
+        for months, sales_name, profit_name in (
+            (12, "previous_sales", "previous_profit"),
+            (9, "next_previous_sales", "next_previous_profit"),
+        ):
+            targets = current.select(
+                "_row", "code", "valuation_date",
+                pl.col("settlement_date").dt.offset_by(f"-{months}mo").dt.strftime("%Y-%m").alias("_month"),
+            )
+            candidates = history.select(
+                "code", pl.col("settlement_date").dt.strftime("%Y-%m").alias("_month"),
+                "settlement_date", "announcement_date",
+                pl.col("sales").alias(sales_name), pl.col("selected_profit").alias(profit_name),
+            )
+            selected = targets.join(candidates, on=["code", "_month"], how="inner").filter(
+                pl.col("announcement_date") < pl.col("valuation_date")
+            ).sort(["_row", "settlement_date", "announcement_date"]).unique(
+                subset="_row", keep="last",
+            ).select("_row", sales_name, profit_name)
+            current = current.join(selected, on="_row", how="left", validate="1:1")
+        dates = current.select("code", pl.col("settlement_date").alias("setd"), "valuation_date")
+        return self._calculate_quarterly_valuation(current).join(
+            dates, on=["code", "setd"], how="left", validate="1:1",
+        ).sort(["code", "setd"])
+
+    @staticmethod
+    def _calculate_quarterly_valuation(df: pl.DataFrame) -> pl.DataFrame:
         sales = pl.col("sales").cast(pl.Float64)
         previous_sales = pl.col("previous_sales").cast(pl.Float64)
         selected_profit = pl.col("selected_profit").cast(pl.Float64)
@@ -1389,6 +1481,7 @@ class KessanPl():
         return df.select(
             "code", pl.col("settlement_date").alias("setd"),
             pl.col("announcement_date").alias("annd"),
+            pl.col("quater").alias("qtr"),
             pl.col("sales").alias("sls"), pl.col("selected_profit").alias("prft"),
             pl.when(valid_pr).then(pr).otherwise(None).alias("pr"),
             pl.when(valid_sales & grsl.is_finite()).then(grsl).otherwise(None).alias("grsl"),
@@ -1424,6 +1517,29 @@ class KessanPl():
         未指定時の出力は従来どおりcode/perf。空入力も同じスキーマで返す。
         self.dfと入力は変更しない。
         """
+        return self._get_quarterly_performance(
+            quarterly_df, pricelist_df, index_df, perf_period=perf_period,
+        )
+
+    def get_quarterly_performance_dataset(
+        self, quarterly_df: pl.DataFrame, pricelist_df: pl.DataFrame,
+        index_df: pl.DataFrame, *, perf_period: Literal["quarter", "announcement"] = "quarter",
+    ) -> pl.DataFrame:
+        """全期間のcode/setd/anndに対しcode/setd/perf/bmを返す（状態変更なし）。
+
+        Date型の日付、分割調整済みcode/date/open、指数date/openを受け取る。
+        計算・欠損条件はget_quarterly_performanceと同じ。%単位、丸めなし。
+        code/setdは一意であること。空入力は同じスキーマの空結果を返す。
+        """
+        if quarterly_df.select("code", "setd").is_duplicated().any():
+            raise ValueError("code/setdは一意にしてください。")
+        return self._get_quarterly_performance(
+            quarterly_df, pricelist_df, index_df, perf_period=perf_period, dataset=True,
+        )
+
+    def _get_quarterly_performance(
+        self, quarterly_df, pricelist_df, index_df, *, perf_period, dataset=False,
+    ) -> pl.DataFrame:
         if perf_period not in ("quarter", "announcement"):
             raise ValueError("perf_periodはquarterまたはannouncementを指定してください。")
         history = self.df.filter(pl.col("settlement_type") == "四").group_by(
@@ -1482,7 +1598,9 @@ class KessanPl():
                 & (bm_end > 0) & bm_end.is_finite() & bm.is_finite()
             )
             outputs.append(pl.when(valid_bm).then(bm).otherwise(None).alias("bm"))
-        return periods.select(outputs).sort("code")
+        if dataset:
+            outputs.insert(1, pl.col("setd"))
+        return periods.select(outputs).sort(["code", "setd"] if dataset else "code")
 
     def filter_settlement_type(self, settlement_type: Literal["quaterly", "yearly"]) -> None:
         df = self.df

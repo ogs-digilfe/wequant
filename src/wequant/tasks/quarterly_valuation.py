@@ -9,7 +9,7 @@ import polars as pl
 from wequant.data_processing import IndexPricelistPl, FinancequotePl, KessanPl, MeigaralistPl, PortfolioManager, PricelistPl
 
 
-OUTPUT_COLUMNS = ("code", "name", "setd", "annd", "sls", "prft", "pr", "grsl", "dgrp", "ngrpr", "PER", "divr", "perf", "bm")
+OUTPUT_COLUMNS = ("code", "name", "setd", "annd", "qtr", "sls", "prft", "pr", "grsl", "dgrp", "ngrpr", "PER", "divr", "perf", "bm")
 
 
 def load_quarterly_valuation_inputs() -> tuple[KessanPl, FinancequotePl, PricelistPl, MeigaralistPl, IndexPricelistPl]:
@@ -68,7 +68,7 @@ def build_quarterly_valuation(
     pr_min: float | None = None,
     pr_max: float | None = None,
 ) -> pl.DataFrame:
-    """入力を変更せず14列の評価一覧を返す。nullは末尾、同値はcode昇順。
+    """入力を変更せず15列の評価一覧を返す。nullは末尾、同値はcode昇順。
 
     perf_periodはperf・bmの期間（quarter: 発表間、announcement: 次回発表当日→翌取引日）。
     index_pricesはnh225の指数。省略時はbmをnullにする（既存呼び出し互換）。

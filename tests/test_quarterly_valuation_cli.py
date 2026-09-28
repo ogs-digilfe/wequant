@@ -16,6 +16,7 @@ def output_frame(count=1):
         "name": ["テスト銘柄"] * count,
         "setd": [date(2026, 6, 30)] * count,
         "annd": [date(2026, 8, 1)] * count,
+        "qtr": [1] * count,
         "sls": [120] * count,
         "prft": [15] * count,
         "pr": [12.5] * count,
@@ -30,6 +31,15 @@ def output_frame(count=1):
 
 
 class QuarterlyValuationCliTests(TestCase):
+    @patch("wequant.cli.quarterly_valuation_flow")
+    def test_quarter_display_and_column_order(self, flow):
+        flow.return_value = output_frame(5).with_columns(pl.Series("qtr", [1, 2, 3, 4, None]))
+        result = CliRunner().invoke(app, ["quarterly-valuation"])
+        self.assertEqual(result.exit_code, 0, result.exception)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[0].split()[3:6], ["annd", "qtr", "sls"])
+        self.assertEqual([line.split()[4] for line in lines[1:]], ["1q", "2q", "3q", "4q", "null"])
+
     @patch("wequant.data_processing.load_data_file")
     def test_cli_with_real_flow_and_calculations(self, load):
         data = {
@@ -43,6 +53,7 @@ class QuarterlyValuationCliTests(TestCase):
                 "settlement_date": [date(2025, 6, 30), date(2026, 6, 30)],
                 "announcement_date": [date(2025, 7, 20), date(2026, 7, 20)],
                 "settlement_type": ["四", "四"],
+                "quater": [1, 1],
                 "sales": [100, 120], "ordinary_profit": [10, 15], "operating_income": [8, 10],
             }),
             "finance_quote.parquet": pl.DataFrame({
@@ -59,13 +70,13 @@ class QuarterlyValuationCliTests(TestCase):
         result = CliRunner().invoke(app, ["quarterly-valuation", "--valuation-date", "2026-09-19"])
         self.assertEqual(result.exit_code, 0, result.exception)
         self.assertEqual(result.stdout.splitlines()[1].split(), [
-            "1001", "試験銘柄", "2026-06-30", "2026-07-20", "120", "10", "8.33%", "20.00%", "10.00%", "null", "12.00", "3.33", "null", "null",
+            "1001", "試験銘柄", "2026-06-30", "2026-07-20", "1q", "120", "10", "8.33%", "20.00%", "10.00%", "null", "12.00", "3.33", "null", "null",
         ])
         self.assertEqual(load.call_count, 5)
         result = CliRunner().invoke(app, ["quarterly-valuation", "--valuation-date", "2026-09-19",
                                           "--profit", "ordinary"])
         self.assertEqual(result.exit_code, 0, result.exception)
-        self.assertEqual(result.stdout.splitlines()[1].split()[5:9], ["15", "12.50%", "20.00%", "25.00%"])
+        self.assertEqual(result.stdout.splitlines()[1].split()[6:10], ["15", "12.50%", "20.00%", "25.00%"])
 
 
         for mode, expected_rows in [("operating", 0), ("ordinary", 1)]:
@@ -91,6 +102,7 @@ class QuarterlyValuationCliTests(TestCase):
                 "settlement_date": [date(2026, 6, 30), date(2026, 9, 30)],
                 "announcement_date": [date(2026, 7, 17), date(2026, 10, 16)],
                 "settlement_type": ["四", "四"],
+                "quater": [1, 1],
                 "sales": [100, 120], "ordinary_profit": [10, 15], "operating_income": [8, 10],
             }),
             "finance_quote.parquet": pl.DataFrame(schema={
@@ -167,7 +179,7 @@ class QuarterlyValuationCliTests(TestCase):
         before = frame.clone()
         result = CliRunner().invoke(app, ["quarterly-valuation"])
         self.assertEqual(result.exit_code, 0, result.exception)
-        cells = [line.split()[4:9] for line in result.stdout.splitlines()[1:]]
+        cells = [line.split()[5:10] for line in result.stdout.splitlines()[1:]]
         self.assertEqual(cells, [
             ["169,927", "33,777", "19.88%", "0.27%", "25.00%"],
             ["1,235", "1,234", "-10.50%", "-10.50%", "-12.50%"],
@@ -176,7 +188,7 @@ class QuarterlyValuationCliTests(TestCase):
         ])
         self.assertEqual([line.split()[-1] for line in result.stdout.splitlines()[1:]],
                          ["20.12%", "-10.50%", "0.00%", "null"])
-        self.assertEqual([line.split()[9] for line in result.stdout.splitlines()[1:]],
+        self.assertEqual([line.split()[10] for line in result.stdout.splitlines()[1:]],
                          ["30.12%", "-20.50%", "0.00%", "null"])
         self.assertTrue(frame.equals(before))
 

@@ -51,7 +51,7 @@ DataFrameを返します。`tasks/quarterly_valuation.py`の読み込みTaskは
 `IndexPricelistPl.from_file()`（nh225）を使用します。
 加工Taskは、`KessanPl.get_quarterly_valuation`と
 `FinancequotePl.get_price_adjusted_valuations`の結果を銘柄コードで左結合し、
-銘柄名の結合、`codes="all"`または整数リストによる絞り込み、`sls`・`grsl`・選択利益`prft`・`dgrp`の上下限による絞り込み、出力14列の選択とソートを行います。
+銘柄名の結合、`codes="all"`または整数リストによる絞り込み、`sls`・`grsl`・選択利益`prft`・`dgrp`の上下限による絞り込み、出力15列の選択とソートを行います。
 `KessanPl.get_quarterly_performance`には選択済み決算と分割調整済み株価の
 DataFrameと指数のDataFrameを渡し、今回・次回の発表翌取引日の始値による騰落率`perf`（%）と、
 同じ取引日の指数始値による`bm`（%）を結合します。指数は日付の完全一致で結合します。
@@ -417,3 +417,41 @@ Notebookには長時間処理やファイル更新などの副作用が含まれ
 抽出、7列の選択、日付昇順の並べ替えを行います。
 銘柄コードは文字列として照合し、整数型と英字入りの文字列型に対応します。
 入力のDataFrameは変更せず、表示・保存はTask・Flowでは行いません。
+
+### 汎用Parquet表示
+
+`cli.py`の`print-parquet`は引数検証と全列の表表示を担当します。
+`flows/print_parquet.py`の`print_parquet_flow(file=..., head=None, tail=None)`は
+読み込みと行選択を組み立て、DataFrameを返します。Notebookからも利用できます。
+`tasks/print_parquet.py`の`load_parquet`は拡張子なしのファイル名を検証し、
+`data_loading.DATA_DIR`直下のファイルを`read_data`で読み込みます。
+管理対象一覧に限定する`resolve_data_path`は使用しません。
+`select_parquet_rows`は行順・列・型を保持して先頭・末尾または全行を返します。
+Task・Flowは行数の検証も行い、入力の変更、表示、保存は行いません。
+全体を読み込んでから行を選択するため、メモリ使用量はファイル全体に依存します。
+
+### 全期間の四半期評価データセット
+
+`cli.py`の`ds-quarterly-valuation`は`profit`と`perf_period`を検証し、
+`flows/ds_quarterly_valuation.py`の`ds_quarterly_valuation_flow`へ渡します。
+Flowは既存の`load_quarterly_valuation_inputs`で5種類のデータを読み込み、
+`tasks/ds_quarterly_valuation.py`の`build_ds_quarterly_valuation`と
+`save_ds_quarterly_valuation`を実行し、DataFrameと保存先Pathを返します。
+CLIは先頭・末尾10行と保存先・件数を表示します。
+
+加工Taskは次の状態を変更しないメソッドを組み合わせます。
+
+- `KessanPl.get_quarterly_valuation_dataset(pricelist_df, profit=...)`：
+  決算期ごとの初回発表、株価履歴による翌取引日の評価日、当時判明していた比較決算を選びます。
+  全期間を対象とし、既存の日付による93日・1銘柄1行の制限は適用しません。
+- `KessanPl.get_quarterly_performance_dataset(...)`：
+  `code, setd`を保持して各決算の`perf, bm`を計算します。
+- `FinancequotePl.get_price_adjusted_valuations_for_dates(prices_df, valuation_dates_df)`：
+  `code, setd, valuation_date`に対し、評価日前の最新指標・終値をas-of結合して補正します。
+
+既存APIとの計算の共有には非公開メソッドを使い、既存の引数・選択条件・出力を維持します。
+加工Taskは`code, setd`で結合し、銘柄名を付加し、`perf, bm`欠損行のみを除外して15列を返します。
+保存Taskは`data_loading.DATA_DIR / "datasets"`へ排他的に新規ファイルを作成します。
+同名ファイルは上書きせず、書き込み失敗時は作成途中のファイルを削除します。
+実データに依存しない計算・時点制約・欠損・状態保持・保存・CLIの検証は
+`tests/test_ds_quarterly_valuation.py`に配置します。

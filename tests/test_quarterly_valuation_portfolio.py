@@ -90,6 +90,7 @@ class PortfolioCliIntegrationTests(TestCase):
                 "settlement_date": [date(2025, 6, 30), date(2026, 6, 30)] * 2 + [date(2026, 6, 30)],
                 "announcement_date": [date(2025, 7, 31), date(2026, 7, 31)] * 2 + [date(2026, 7, 31)],
                 "settlement_type": ["四"] * 5,
+                "quater": [1] * 5,
                 "operating_income": [8, 16, 8, 12, 16],
                 "sales": [100, 150, 100, 105, 200], "ordinary_profit": [10, 20, 10, 15, 20],
             }),

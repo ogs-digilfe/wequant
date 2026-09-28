@@ -11,6 +11,7 @@ import typer
 
 from wequant.flows.download_data import download_data_flow
 from wequant.flows.price_history import price_history_flow
+from wequant.flows.print_parquet import print_parquet_flow
 from wequant.flows.quarterly_valuation import quarterly_valuation_flow
 from wequant.tasks.quarterly_valuation import OUTPUT_COLUMNS
 
@@ -129,6 +130,8 @@ def quarterly_valuation(
     def format_value(column: str, value: object) -> str:
         if value is None:
             return "null"
+        if column == "qtr":
+            return f"{value}q"
         if column in ("sls", "prft"):
             rounded = Decimal(str(value)).to_integral_value(rounding=ROUND_HALF_UP)
             return f"{rounded:,f}"
@@ -198,3 +201,58 @@ def price_history(
         typer.echo("  ".join(value.rjust(width) for value, width in zip(row, widths)))
     if result.is_empty():
         typer.echo("該当データなし", err=True)
+
+
+@app.command()
+def print_parquet(
+    file: Annotated[str, typer.Option(help="data/直下のParquetファイル名（拡張子なし）。")],
+    head: Annotated[int | None, typer.Option(min=1, help="先頭N行。tailと同時指定不可。")] = None,
+    tail: Annotated[int | None, typer.Option(min=1, help="末尾N行。headと同時指定不可。")] = None,
+):
+    """Parquetを全列表示する。行数指定を省略すると全行表示する。"""
+    if head is not None and tail is not None:
+        raise typer.BadParameter("--headと--tailは同時に指定できません。")
+    try:
+        result = print_parquet_flow(file=file, head=head, tail=tail)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        typer.echo(f"Parquetを読み込めません: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    def format_cell(value: object) -> str:
+        text = "null" if value is None else str(value)
+        # セル内の改行やタブをエスケープして1レコードを1行で表示する。
+        return text.replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+
+    def width(value: str) -> int:
+        return sum(0 if combining(c) else 2 if east_asian_width(c) in ("W", "F") else 1 for c in value)
+
+    columns = [format_cell(column) for column in result.columns]
+    rows = [[format_cell(value) for value in row] for row in result.iter_rows()]
+    widths = [
+        max(width(column), max((width(row[i]) for row in rows), default=0))
+        for i, column in enumerate(columns)
+    ]
+    for row in [columns, *rows]:
+        typer.echo("  ".join(value + " " * (size - width(value))
+                             for value, size in zip(row, widths)).rstrip())
+    if result.is_empty():
+        typer.echo("該当データなし", err=True)
+
+
+@app.command()
+def ds_quarterly_valuation(
+    profit: Annotated[ProfitType, typer.Option(help="利益種別：operating=営業利益、ordinary=経常利益。")] = ProfitType.operating,
+    perf_period: Annotated[PerfPeriod, typer.Option(help="騰落率の期間：quarter=発表間、announcement=次回発表当日→翌取引日（始値）。")] = PerfPeriod.quarter,
+):
+    """全期間の四半期評価をdata/datasetsへParquet保存し、先頭・末尾10行を表示する。"""
+    from wequant.flows.ds_quarterly_valuation import ds_quarterly_valuation_flow
+
+    result, path = ds_quarterly_valuation_flow(profit=profit.value, perf_period=perf_period.value)
+    with pl.Config(tbl_rows=10, tbl_cols=-1, tbl_width_chars=240):
+        typer.echo("head 10")
+        typer.echo(str(result.head(10)))
+        typer.echo("tail 10")
+        typer.echo(str(result.tail(10)))
+    typer.echo(f"保存先: {path}（{result.height}行）")

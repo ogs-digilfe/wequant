@@ -20,7 +20,7 @@ def kessan(rows):
     return KessanPl(pl.DataFrame(rows, schema={
         "code": pl.Int64, "settlement_date": pl.Date, "settlement_type": pl.String,
         "announcement_date": pl.Date, "sales": pl.Float64, "ordinary_profit": pl.Float64,
-    }, orient="row").with_columns(pl.col("ordinary_profit").alias("operating_income")))
+    }, orient="row").with_columns(pl.col("ordinary_profit").alias("operating_income"), pl.lit(1).alias("quater")))
 
 
 def quotes(rows):
@@ -37,6 +37,26 @@ def prices(rows):
 
 
 class QuarterlyCalculationTests(TestCase):
+    def test_quarter_uses_selected_source_value_without_calendar_conversion(self):
+        source = kessan([
+            settlement(1, 2026, 100, 10),
+            settlement(1, 2026, 120, 12, announced=date(2026, 8, 1)),
+            settlement(2, 2026, 100, 10),
+            settlement(3, 2026, 100, 10),
+            settlement(4, 2026, 100, 10),
+            settlement(5, 2026, 100, 10),
+        ])
+        source.df = source.df.with_columns(pl.Series("quater", [4, 1, 2, 3, 4, None]))
+        before = source.df.clone()
+        result = source.get_quarterly_valuation(VALUATION_DATE)
+        self.assertEqual(result["qtr"].to_list(), [1, 2, 3, 4, None])
+        self.assertEqual(result.columns[2:4], ["annd", "qtr"])
+        self.assertEqual(result["annd"][0], date(2026, 8, 1))
+        assert_frame_equal(source.df, before)
+        empty = KessanPl(source.df.clear()).get_quarterly_valuation(VALUATION_DATE)
+        self.assertTrue(empty.is_empty())
+        self.assertEqual(empty.schema, result.schema)
+
     def test_year_month_match_latest_and_date_boundaries(self):
         lower = VALUATION_DATE - timedelta(days=93)
         rows = [
@@ -540,7 +560,7 @@ class QuarterlyBuildTests(TestCase):
         before = source.df.clone()
         for mode in ("operating", "ordinary"):
             result = source.get_quarterly_valuation(VALUATION_DATE, profit=mode)
-            self.assertEqual(result.columns, ["code", "setd", "annd", "sls", "prft", "pr", "grsl", "dgrp", "ngrpr"])
+            self.assertEqual(result.columns, ["code", "setd", "annd", "qtr", "sls", "prft", "pr", "grsl", "dgrp", "ngrpr"])
             self.assertEqual(result["pr"].to_list(), [expected for _, _, expected in cases])
             self.assertEqual(result["dgrp"].null_count(), len(cases))
         assert_frame_equal(source.df, before)
