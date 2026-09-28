@@ -2,6 +2,7 @@
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
+from pathlib import Path
 import re
 from typing import Annotated, Literal
 from unicodedata import combining, east_asian_width
@@ -256,3 +257,60 @@ def ds_quarterly_valuation(
         typer.echo("tail 10")
         typer.echo(str(result.tail(10)))
     typer.echo(f"保存先: {path}（{result.height}行）")
+
+
+class PreparationTarget(str, Enum):
+    perf = "perf"
+    excess_return = "excess-return"
+
+
+@app.command()
+def prepare_quarterly_valuation(
+    input_path: Annotated[Path, typer.Option("--input", help="原本Parquetのパス（相対パスはリポジトリルート基準）。")],
+    target: Annotated[PreparationTarget, typer.Option(help="目的変数：perf / excess-return（perf - bm）。")],
+    feature: Annotated[list[str], typer.Option("--feature", help="特徴量：sls, prft, pr, grsl, dgrp, ngrpr, PER, divr。繰り返し指定。")],
+    output_path: Annotated[Path | None, typer.Option("--output", help="保存先。省略時はdata/datasets/preparedへ日時付きで保存。")] = None,
+    setd_from: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"], help="決算期の開始日（含む、YYYY-MM-DD）。")] = None,
+    setd_to: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"], help="決算期の終了日（含む、YYYY-MM-DD）。")] = None,
+    qtr: Annotated[list[int] | None, typer.Option(min=1, max=4, help="対象四半期。繰り返し指定。未指定なら全四半期。")] = None,
+    sls_min: Annotated[float | None, typer.Option(help="売上高の下限（元データの単位、含む）。")] = None,
+    sls_max: Annotated[float | None, typer.Option(help="売上高の上限（元データの単位、含む）。")] = None,
+    prft_min: Annotated[float | None, typer.Option(help="利益の下限（元データの単位、含む）。")] = None,
+    prft_max: Annotated[float | None, typer.Option(help="利益の上限（元データの単位、含む）。")] = None,
+    pr_min: Annotated[float | None, typer.Option(help="利益率の下限（%、含む）。")] = None,
+    pr_max: Annotated[float | None, typer.Option(help="利益率の上限（%、含む）。")] = None,
+    grsl_min: Annotated[float | None, typer.Option(help="売上成長率の下限（%、含む）。")] = None,
+    grsl_max: Annotated[float | None, typer.Option(help="売上成長率の上限（%、含む）。")] = None,
+    dgrp_min: Annotated[float | None, typer.Option(help="増収増益率の下限（倍率、0.2=20%、含む）。")] = None,
+    dgrp_max: Annotated[float | None, typer.Option(help="増収増益率の上限（倍率、0.2=20%、含む）。")] = None,
+    ngrpr_min: Annotated[float | None, typer.Option(help="次四半期増益率の下限（%、含む）。")] = None,
+    ngrpr_max: Annotated[float | None, typer.Option(help="次四半期増益率の上限（%、含む）。")] = None,
+    per_min: Annotated[float | None, typer.Option(help="PERの下限（倍、含む）。")] = None,
+    per_max: Annotated[float | None, typer.Option(help="PERの上限（倍、含む）。")] = None,
+    divr_min: Annotated[float | None, typer.Option(help="配当利回りの下限（%、含む）。")] = None,
+    divr_max: Annotated[float | None, typer.Option(help="配当利回りの上限（%、含む）。")] = None,
+):
+    """四半期評価の原本を絞り込み、特徴量・目的変数と加工条件を新規保存する。"""
+    from wequant.flows.prepare_quarterly_valuation import prepare_quarterly_valuation_flow
+    from wequant.tasks.prepare_quarterly_valuation import PreparationOptions
+
+    ranges = {
+        "sls": (sls_min, sls_max), "prft": (prft_min, prft_max),
+        "pr": (pr_min, pr_max), "grsl": (grsl_min, grsl_max),
+        "dgrp": (dgrp_min, dgrp_max), "ngrpr": (ngrpr_min, ngrpr_max),
+        "PER": (per_min, per_max), "divr": (divr_min, divr_max),
+    }
+    options = PreparationOptions(
+        features=tuple(feature), target=target.value,
+        setd_from=setd_from.date() if setd_from else None,
+        setd_to=setd_to.date() if setd_to else None,
+        qtr=tuple(qtr or ()),
+        numeric_ranges={c: bounds for c, bounds in ranges.items() if bounds != (None, None)},
+    )
+    try:
+        result, path = prepare_quarterly_valuation_flow(input_path, options, output_path)
+    except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
+        typer.echo(f"エラー: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"保存先: {path}（{result.height}行）")
+    typer.echo(f"加工条件: {path.with_suffix('.json')}")

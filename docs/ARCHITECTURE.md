@@ -455,3 +455,51 @@ CLIは先頭・末尾10行と保存先・件数を表示します。
 同名ファイルは上書きせず、書き込み失敗時は作成途中のファイルを削除します。
 実データに依存しない計算・時点制約・欠損・状態保持・保存・CLIの検証は
 `tests/test_ds_quarterly_valuation.py`に配置します。
+
+## 四半期評価データセットの学習前加工
+
+`prepare-quarterly-valuation`は原本データセットの行・特徴量の選択と目的変数の作成を行います。
+`cli.py`は日付・四半期・数値範囲・目的変数・特徴量を受け取り、
+`tasks/prepare_quarterly_valuation.py`の`PreparationOptions`にまとめて
+`flows/prepare_quarterly_valuation.py`の`prepare_quarterly_valuation_flow`へ渡します。
+既存のデータ処理クラスの初期化を再適用せず、生成済みParquetを直接扱います。
+
+- 共通の加工Task `prepare_quarterly_valuation(df, options)`は、
+  ファイルI/Oなしで入力DataFrameから加工済みDataFrameを返します。
+  入力や条件を変更せず、行順と選択特徴量の値・型を保持します。
+- `PreparationOptions.validate()`は特徴量の許可リスト、目的変数、四半期、
+  日付・数値の範囲を検証します。Taskは必要列と型も検証します。
+  `perf/bm`を特徴量やフィルターへ含めることはできません。
+- Flowはリポジトリルート基準で指定パスを解決し、入力をSHA-256で記録して読み込み、
+  共通加工Taskの結果と加工条件を保存Taskへ渡します。DataFrameと保存先Pathを返します。
+- 保存Taskは`data/datasets/prepared/quarterly-valuation-YYYYMMDD_HHMMSS.parquet`
+  または指定パスと、同名JSONを排他的に新規作成します。
+  既存ファイルは上書きしません。例外時は今回作成したファイルだけを削除します。
+  2ファイル全体の保存は単一の原子的操作ではないため、強制終了時の完全性は保証しません。
+- JSONの`schema_version=1`は記録形式の版です。`features`は学習へ渡す列の指定順、
+  `identifier_columns`は照合・期間管理の列、`target`は目的変数の定義です。
+  入力パス・SHA-256、フィルター、作成日時、加工前後の件数も記録します。
+
+Pythonや将来の学習コマンドは共通の加工Taskを直接呼び、中間保存を挟まず利用できます。
+
+```python
+from wequant.tasks.prepare_quarterly_valuation import (
+    PreparationOptions,
+    prepare_quarterly_valuation,
+)
+
+options = PreparationOptions(
+    features=("grsl", "ngrpr", "PER"),
+    target="excess-return",
+    qtr=(1,),
+    numeric_ranges={"PER": (None, 20)},
+)
+prepared = prepare_quarterly_valuation(original_df, options)
+X = prepared.select(options.features)
+y = prepared["target"]
+```
+
+このTaskは特徴量の補完・標準化・学習・期間分割を担当しません。
+欠損、単位、出力列の詳細はCLIリファレンスを参照してください。
+人工データによる加工、既存原本生成との接続、入力状態の保持、保存失敗・衝突、
+CLIのテストは`tests/test_prepare_quarterly_valuation.py`に配置します。

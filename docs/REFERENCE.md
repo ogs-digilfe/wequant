@@ -445,3 +445,92 @@ uv run wq ds-quarterly-valuation --profit ordinary --perf-period announcement
   銘柄名には読み込んだ銘柄一覧を使い、過去時点の名称は復元しません。
 
 ローカルの既存5ファイルを読み込みます。ダウンロード・外部通信は行いません。
+
+## `prepare-quarterly-valuation`
+
+`ds-quarterly-valuation`で保存した原本Parquetを指定し、行のフィルター、
+既存特徴量の選択、目的変数の作成を行って別ファイルへ保存します。
+原本は変更しません。外部通信、特徴量の追加計算、欠損補完、標準化、学習は行いません。
+
+```bash
+uv run wq prepare-quarterly-valuation \
+  --input data/datasets/ds-quarterly-valuation-operating-quarter-20260927_123456.parquet \
+  --setd-from 2020-01-01 \
+  --setd-to 2025-12-31 \
+  --qtr 1 \
+  --sls-min 10000 \
+  --per-max 20 \
+  --target excess-return \
+  --feature grsl \
+  --feature ngrpr \
+  --feature PER
+```
+
+| オプション | 内容 |
+| --- | --- |
+| `--input` | 必須。入力Parquetのファイルパス |
+| `--target` | 必須。`perf`（騰落率、%）または`excess-return`（`perf - bm`、パーセントポイント） |
+| `--feature` | 必須。使用する特徴量を1列以上指定。複数列は繰り返し指定 |
+| `--output` | 出力Parquetのパス。省略時は下記の日時付き保存先 |
+| `--setd-from` / `--setd-to` | 決算期の日付範囲。`YYYY-MM-DD`で指定、両端を含む。片側だけでも可 |
+| `--qtr` | 対象四半期（1〜4）。`--qtr 1 --qtr 2`のように複数指定可。省略時は全四半期 |
+| `--sls-min` / `--sls-max` | 売上高の範囲 |
+| `--prft-min` / `--prft-max` | 原本の利益種別に対応する利益の範囲 |
+| `--pr-min` / `--pr-max` | 利益率（%）の範囲 |
+| `--grsl-min` / `--grsl-max` | 売上成長率（%）の範囲 |
+| `--dgrp-min` / `--dgrp-max` | 増収増益率（倍率）の範囲。`0.2`は20% |
+| `--ngrpr-min` / `--ngrpr-max` | 次四半期増益率（%）の範囲 |
+| `--per-min` / `--per-max` | PER（倍）の範囲 |
+| `--divr-min` / `--divr-max` | 配当利回り（%）の範囲 |
+
+相対パスは入出力ともリポジトリルートから解決します。
+数値範囲は元データと同じ単位で、下限・上限を含み、片側だけでも指定できます。
+`quarterly-valuation`の`--dgrp-min/max`は%指定ですが、
+この加工コマンドでは保存済みの倍率をそのまま指定します。
+複数列のフィルターはAND、`--qtr`の複数値はORで組み合わせます。
+フィルターに使った列を特徴量として選ぶ必要はありません。
+
+特徴量の選択肢は`sls, prft, pr, grsl, dgrp, ngrpr, PER, divr`です。
+列名は大文字・小文字を区別し、PERの指定は`--feature PER`です。
+特徴量を重複指定した場合、範囲が逆転している場合、境界値がNaN/無限の場合、
+必須列がない場合や型が合わない場合はエラーにします。
+入力の`setd/annd`はDate型、`qtr`は整数型、使用する指標は数値型が前提です。
+数値列の全件nullも受け付けます。
+
+### 出力と欠損の扱い
+
+出力列は`code, setd, annd, qtr`、指定順の特徴量、`target`です。
+入力の行順を維持し、特徴量の値や型は変更しません。
+`target`はFloat64で、選択した計算結果を丸めず保存します。
+`name, perf, bm`および未選択の特徴量は出力に残しません。
+
+- 範囲を指定した数値列のnull・NaN・無限値は、その行を除外します。
+- 日付や四半期で絞る場合、対象列のnullは除外します。
+- それ以外の特徴量の欠損・非有限値は保持し、学習側で扱います。
+- フィルター適用後の目的変数にnull・非有限値がある場合はエラーにします。
+  `--target perf`では`bm`の欠損を除外理由にしません。
+- 結果が0行でも、スキーマを保持したParquetと加工条件JSONを保存します。
+
+既定の保存先は次のとおりです。日時は実行環境のローカル時刻です。
+
+```text
+data/datasets/prepared/
+├── quarterly-valuation-YYYYMMDD_HHMMSS.parquet
+└── quarterly-valuation-YYYYMMDD_HHMMSS.json
+```
+
+`--output data/datasets/prepared/example.parquet`と指定すれば、
+条件ファイルは同じディレクトリの`example.json`です。
+親ディレクトリがなければ作成します。出力拡張子は`.parquet`とします。
+どちらかが既存なら上書きせずエラーにし、保存中の失敗では今回作成したファイルを削除します。
+標準出力にはParquet・JSONの保存先と加工後の件数を表示します。
+
+JSONには入力の絶対パスとSHA-256、作成日時、適用フィルター、特徴量の指定順、
+管理用列、目的変数の種類・式・列名、加工前後の件数を保存します。
+学習側はJSONの`features`を使って特徴量を選択し、管理用列を自動的に入力へ含めないでください。
+
+`ngrpr`は評価時点の情報から算出された指標として特徴量・フィルターに使用できます。
+未来結果の`perf/bm`は目的変数の作成にのみ使い、特徴量や対象行のフィルターには指定できません。
+`setd`は決算期であり、評価日や目的変数の計測終了日ではありません。
+このコマンドは学習・検証の期間分割を行いません。期間を分ける際は、
+評価時点での情報の利用可能性や目的変数の計測期間の重複を別途考慮してください。
