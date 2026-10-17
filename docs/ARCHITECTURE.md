@@ -503,3 +503,19 @@ y = prepared["target"]
 欠損、単位、出力列の詳細はCLIリファレンスを参照してください。
 人工データによる加工、既存原本生成との接続、入力状態の保持、保存失敗・衝突、
 CLIのテストは`tests/test_prepare_quarterly_valuation.py`に配置します。
+
+## 押し目候補CLI
+
+`get-oshime`は`flows/oshime.py`の`get_oshime_flow`へ処理を委譲します。
+`tasks/oshime.py`の`load_oshime_inputs`は調整済み株価と銘柄一覧を読み込み、
+`build_oshime_candidates`は`PricelistPl.get_oshime_candidates(valuation_date=..., decline_rate=...)`
+で得たコードへ銘柄名を左結合してコード昇順の`code`, `name`を返します。
+加工メソッドは保持データを変更せず、評価日以後の株価を計算に使用しません。
+銘柄一覧のコードは株価側の型へ変換し、コード重複は結合エラーにします。
+CLIが日付の解釈と全件の表表示を担当します。条件の詳細はREFERENCE.mdに記載します。
+
+押し目幅の最小下落率`decline_rate`（既定5、%単位）はCLIからFlow・Taskを経由して
+加工メソッドへ渡します。許容範囲は0～12%です。MA25・MA75の位置と最近の傾き、
+直近25行の高値が高値日までの60行最高値であること、高値翌日以降の押し目安値を
+判定します。高値・安値の期間、MA25との距離、下落率と反発率、MA5回復と前日高値突破を
+組み合わせます。入力にhigh・low列も必要です。期間や率の境界はREFERENCE.mdを参照します。

@@ -11,6 +11,7 @@ import polars as pl
 import typer
 
 from wequant.flows.download_data import download_data_flow
+from wequant.flows.oshime import get_oshime_flow
 from wequant.flows.price_history import price_history_flow
 from wequant.flows.print_parquet import print_parquet_flow
 from wequant.flows.quarterly_valuation import quarterly_valuation_flow
@@ -314,3 +315,38 @@ def prepare_quarterly_valuation(
         raise typer.Exit(code=1) from exc
     typer.echo(f"保存先: {path}（{result.height}行）")
     typer.echo(f"加工条件: {path.with_suffix('.json')}")
+
+
+@app.command()
+def get_oshime(
+    valuation_date: Annotated[
+        datetime | None,
+        typer.Option(formats=["%Y-%m-%d"], help="評価日（YYYY-MM-DD）。省略時は今日。"),
+    ] = None,
+    decline_rate: Annotated[float, typer.Option(help="押し目幅の最小下落率（%）。0以上12以下。")] = 5.0,
+):
+    """調整済み株価から押し目ねらいの候補銘柄を表示する。"""
+    from math import isfinite
+
+    if not isfinite(decline_rate) or not 0 <= decline_rate <= 12:
+        raise typer.BadParameter("0以上12以下の有限値を指定してください。", param_hint="--decline-rate")
+    try:
+        result = get_oshime_flow(
+            valuation_date=valuation_date.date() if valuation_date else date.today(),
+            decline_rate=decline_rate,
+        )
+    except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
+        typer.echo(f"押し目候補を取得できません: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    rows = [["null" if v is None else str(v) for v in row] for row in result.iter_rows()]
+
+    def width(value: str) -> int:
+        return sum(0 if combining(c) else 2 if east_asian_width(c) in ("W", "F") else 1 for c in value)
+
+    widths = [max(width(col), max((width(row[i]) for row in rows), default=0))
+              for i, col in enumerate(result.columns)]
+    for row in [result.columns, *rows]:
+        typer.echo("  ".join(value + " " * (size - width(value))
+                             for value, size in zip(row, widths)).rstrip())
+    if result.is_empty():
+        typer.echo("該当データなし", err=True)

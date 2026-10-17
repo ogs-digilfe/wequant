@@ -1171,6 +1171,84 @@ class PricelistPl():
         
         self.df = df
 
+    def get_oshime_candidates(
+        self, *, valuation_date: date, decline_rate: float = 5.0,
+    ) -> pl.DataFrame:
+        """上昇基調でMA25付近へ調整後、反発初期にあるcodeを昇順で返す。
+
+        code、date（日付型）、close/high/low（数値型）が必要。
+        評価日以前の全体最新日を対象日とし、日数は銘柄の日付昇順の行位置差。
+        MAは当日込みの終値単純移動平均。MA25 > MA75、MA25 > 5行前MA25、
+        MA75 > 10行前MA75を要求する。直近25行の最後の最高値日が、
+        その日込み60行の最高値であることを要求する。高値翌行以降の最後の
+        最安値まで3～15行、安値から対象日まで1～5行、下落率は指定値～12%。
+        安値/安値日MA25は0.97～1.03、終値/安値-1は5%以下。
+        前行終値 < 前行MA5、当日終値 >= MA5かつ前行高値超を要求する。
+        decline_rateは有限の0～12（%）。履歴不足、必要値の欠損・非有限値、
+        率の分母が0以下、対象日に行がない銘柄は除外する。
+        同値の高値・安値は最後の日を使う。self.dfは変更しない。
+        """
+        from math import isfinite
+
+        if not isfinite(decline_rate) or not 0 <= decline_rate <= 12:
+            raise ValueError("decline_rateは0以上12以下の有限値を指定してください。")
+        df = self.df.select("code", "date", "close", "high", "low").filter(
+            pl.col("date") <= valuation_date
+        ).sort(["code", "date"])
+        if df.is_empty():
+            return df.select("code")
+        target_date = df["date"].max()
+        df = df.with_columns([
+            pl.when(pl.col(c).is_finite()).then(pl.col(c)).otherwise(None).alias(c)
+            for c in ("close", "high", "low")
+        ]).with_columns(
+            pl.int_range(pl.len()).over("code").alias("_i"),
+            pl.col("close").rolling_mean(5).over("code").alias("_ma5"),
+            pl.col("close").rolling_mean(25).over("code").alias("_ma25"),
+            pl.col("close").rolling_mean(75).over("code").alias("_ma75"),
+            pl.col("high").rolling_max(60).over("code").alias("_high60"),
+        ).with_columns(
+            pl.col("_ma25").shift(5).over("code").alias("_past25"),
+            pl.col("_ma75").shift(10).over("code").alias("_past75"),
+            pl.col("high").shift(1).over("code").alias("_previous_high"),
+            (pl.col("close") < pl.col("_ma5")).shift(1).over("code").alias("_previous_below"),
+        )
+        targets = df.filter(
+            (pl.col("date") == target_date)
+            & (pl.col("_ma25") > pl.col("_ma75"))
+            & (pl.col("_ma25") > pl.col("_past25"))
+            & (pl.col("_ma75") > pl.col("_past75"))
+            & (pl.col("close") >= pl.col("_ma5"))
+            & (pl.col("close") > pl.col("_previous_high"))
+            & pl.col("_previous_below")
+        ).select("code", pl.col("_i").alias("_target_i"), pl.col("close").alias("_close"))
+        windows = df.join(targets, on="code", how="inner").filter(
+            pl.col("_i") > pl.col("_target_i") - 25
+        )
+        peaks = windows.group_by("code").agg(
+            pl.col("high").count().alias("_valid"),
+            pl.col("_i").filter(pl.col("high") == pl.col("high").max()).max().alias("_peak_i"),
+        ).filter(pl.col("_valid") == 25)
+        peaks = windows.join(peaks, on="code").filter(
+            (pl.col("_i") == pl.col("_peak_i"))
+            & (pl.col("high") > 0) & (pl.col("high") == pl.col("_high60"))
+        ).select("code", "_peak_i", pl.col("high").alias("_peak"))
+        after = windows.join(peaks, on="code").filter(pl.col("_i") > pl.col("_peak_i"))
+        troughs = after.group_by("code").agg(
+            (pl.col("low").count() == pl.len()).alias("_valid_low"),
+            pl.col("_i").filter(pl.col("low") == pl.col("low").min()).max().alias("_trough_i"),
+        ).filter(pl.col("_valid_low"))
+        return after.join(troughs, on="code").filter(
+            (pl.col("_i") == pl.col("_trough_i"))
+            & (pl.col("_trough_i") - pl.col("_peak_i")).is_between(3, 15)
+            & (pl.col("_target_i") - pl.col("_trough_i")).is_between(1, 5)
+            & (pl.col("low") > 0) & (pl.col("_ma25") > 0)
+            & (pl.col("low") / pl.col("_ma25")).is_between(0.97, 1.03)
+            & ((pl.col("_peak") - pl.col("low")) / pl.col("_peak") * 100)
+            .is_between(decline_rate, 12)
+            & ((pl.col("_close") - pl.col("low")) / pl.col("low") * 100 <= 5)
+        ).select("code").unique().sort("code")
+
     def with_columns_moving_average(self, term, col="close") -> None:
         """銘柄別にterm行の移動平均をma{term}列へ追加・更新する。
 

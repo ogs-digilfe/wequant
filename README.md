@@ -63,6 +63,7 @@ uv run python -m unittest discover -s tests -v
 
 ## ドキュメント
 
+- [ユーザーガイド](docs/USERGUIDE.md): コマンドを使った分析用データの準備手順
 - [アーキテクチャ](docs/ARCHITECTURE.md): コード配置、各モジュールの責務、実装時の基本設計
 - [CLIリファレンス](docs/REFERENCE.md): `wq`コマンドの仕様、設定、利用例
 - [リファクタリング開始時点の記録](docs/refactoring-baseline.md): 現在の構成へ移行する前のスナップショット
