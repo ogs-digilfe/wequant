@@ -508,14 +508,35 @@ CLIのテストは`tests/test_prepare_quarterly_valuation.py`に配置します�
 
 `get-oshime`は`flows/oshime.py`の`get_oshime_flow`へ処理を委譲します。
 `tasks/oshime.py`の`load_oshime_inputs`は調整済み株価と銘柄一覧を読み込み、
-`build_oshime_candidates`は`PricelistPl.get_oshime_candidates(valuation_date=..., decline_rate=...)`
+`build_oshime_candidates`は`PricelistPl.get_oshime_candidates(valuation_date=..., min_decline_rate=..., max_decline_rate=..., ma25_up_days=...)`
 で得たコードへ銘柄名を左結合してコード昇順の`code`, `name`を返します。
 加工メソッドは保持データを変更せず、評価日以後の株価を計算に使用しません。
 銘柄一覧のコードは株価側の型へ変換し、コード重複は結合エラーにします。
 CLIが日付の解釈と全件の表表示を担当します。条件の詳細はREFERENCE.mdに記載します。
 
-押し目幅の最小下落率`decline_rate`（既定5、%単位）はCLIからFlow・Taskを経由して
-加工メソッドへ渡します。許容範囲は0～12%です。MA25・MA75の位置と最近の傾き、
+押し目幅の下落率の下限`min_decline_rate`（既定5）と上限`max_decline_rate`（既定12）は
+%単位でCLIからFlow・Taskを経由して加工メソッドへ渡します。
+有限値で`0 <= min < max <= 100`を要求し、下限以上・上限未満で抽出します。
+旧`decline_rate`引数と`--decline-rate`オプションは削除しています。`ma25_up_days`（既定50、1以上の整数）も
+同じ経路で渡し、高値日を含む指定日数の前日比較すべてでMA25の上昇を要求します。
+高値翌日以降は連続上昇判定から外し、対象日のMA25と5行前の比較は行いません。
+対象日のMA25 > MA75とMA75の最近の上向き、
 直近25行の高値が高値日までの60行最高値であること、高値翌日以降の押し目安値を
-判定します。高値・安値の期間、MA25との距離、下落率と反発率、MA5回復と前日高値突破を
-組み合わせます。入力にhigh・low列も必要です。期間や率の境界はREFERENCE.mdを参照します。
+判定します。高値・安値の期間、下落率と反発率、MA5回復と前日高値突破を
+組み合わせます。押し目安値とMA25の距離は制限しません。入力にhigh・low列も必要です。期間や率の境界はREFERENCE.mdを参照します。
+
+調整期間は`min_pullback_days`（既定3）・`max_pullback_days`（既定16）を
+CLIからFlow・Taskを経由して加工メソッドへ渡します。整数で`1 <= min < max`を
+要求し、高値日から安値日までの行位置差を下限以上・上限未満で判定します。
+
+安値の新しさは`min_low_age_days`（既定1）・`max_low_age_days`（既定6）を
+CLIからFlow・Task経由で加工メソッドへ渡します。整数で`1 <= min < max`を要求し、
+安値日から対象日までの行位置差を下限以上・上限未満で判定します。
+
+反発初期の上限`max_rebound_rate`（既定10、%単位）はCLIからFlow・Task経由で
+加工メソッドへ渡します。0以上の有限値を要求し、安値から対象日終値への
+反発率が指定値以下（上限を含む）であることを判定します。
+
+MA5回復は安値翌日から対象日まででMA5 > 前日MA5、終値 > 当日MA5、終値 > 当日MA25が
+初めて同時成立する日を求め、対象日との一致を要求します。前日終値のMA5未満は要求しません。
+初回はこの3条件だけで決め、他の抽出条件は対象日に別途判定します。

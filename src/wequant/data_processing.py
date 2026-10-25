@@ -1172,26 +1172,50 @@ class PricelistPl():
         self.df = df
 
     def get_oshime_candidates(
-        self, *, valuation_date: date, decline_rate: float = 5.0,
+        self, *, valuation_date: date, min_decline_rate: float = 5.0, max_decline_rate: float = 12.0,
+        ma25_up_days: int = 50,
+        min_pullback_days: int = 3, max_pullback_days: int = 16,
+        min_low_age_days: int = 1, max_low_age_days: int = 6,
+        max_rebound_rate: float = 10.0,
     ) -> pl.DataFrame:
-        """上昇基調でMA25付近へ調整後、反発初期にあるcodeを昇順で返す。
+        """上昇基調で調整後、反発初期にあるcodeを昇順で返す。
 
         code、date（日付型）、close/high/low（数値型）が必要。
         評価日以前の全体最新日を対象日とし、日数は銘柄の日付昇順の行位置差。
-        MAは当日込みの終値単純移動平均。MA25 > MA75、MA25 > 5行前MA25、
+        MAは当日込みの終値単純移動平均。対象日のMA25 > MA75、
         MA75 > 10行前MA75を要求する。直近25行の最後の最高値日が、
-        その日込み60行の最高値であることを要求する。高値翌行以降の最後の
-        最安値まで3～15行、安値から対象日まで1～5行、下落率は指定値～12%。
-        安値/安値日MA25は0.97～1.03、終値/安値-1は5%以下。
-        前行終値 < 前行MA5、当日終値 >= MA5かつ前行高値超を要求する。
-        decline_rateは有限の0～12（%）。履歴不足、必要値の欠損・非有限値、
+        その日込み60行の最高値であること、および高値日を含むma25_up_days回の
+        前日比較すべてでMA25が上昇していることを要求する。同値は不成立。
+        高値翌日以降のMA25の上昇は要求しない。ma25_up_daysは1以上の整数。
+        高値翌行以降の最後の
+        最安値までmin_pullback_days以上max_pullback_days未満の行数、安値から対象日まではmin_low_age_days以上max_low_age_days未満の行数、下落率は下限以上・上限未満。
+        安値から終値への上昇率はmax_rebound_rate（既定10%）以下。
+        max_rebound_rateは0以上の有限値。安値とMA25の距離は制限しない。
+        安値翌日以降でMA5 > 前日MA5、終値 > MA5、終値 > MA25が
+        初めて同時成立した日を
+        回復日とし、対象日との一致を要求する。初回判定には他の条件を含めない。
+        前日終値のMA5未満は要求せず、対象日の前行高値突破は維持する。
+        上下限は有限値で0 <= min_decline_rate < max_decline_rate <= 100（%）。履歴不足、必要値の欠損・非有限値、
         率の分母が0以下、対象日に行がない銘柄は除外する。
         同値の高値・安値は最後の日を使う。self.dfは変更しない。
         """
         from math import isfinite
 
-        if not isfinite(decline_rate) or not 0 <= decline_rate <= 12:
-            raise ValueError("decline_rateは0以上12以下の有限値を指定してください。")
+        if (not isfinite(min_decline_rate) or not isfinite(max_decline_rate)
+                or not 0 <= min_decline_rate < max_decline_rate <= 100):
+            raise ValueError("下落率は有限値で0 <= min_decline_rate < max_decline_rate <= 100を指定してください。")
+        if isinstance(ma25_up_days, bool) or not isinstance(ma25_up_days, int) or ma25_up_days < 1:
+            raise ValueError("ma25_up_daysは1以上の整数を指定してください。")
+        if (any(isinstance(v, bool) or not isinstance(v, int)
+                for v in (min_pullback_days, max_pullback_days))
+                or not 1 <= min_pullback_days < max_pullback_days):
+            raise ValueError("調整期間は整数で1 <= min_pullback_days < max_pullback_daysを指定してください。")
+        if (any(isinstance(v, bool) or not isinstance(v, int)
+                for v in (min_low_age_days, max_low_age_days))
+                or not 1 <= min_low_age_days < max_low_age_days):
+            raise ValueError("安値の経過日数は整数で1 <= min_low_age_days < max_low_age_daysを指定してください。")
+        if not isfinite(max_rebound_rate) or max_rebound_rate < 0:
+            raise ValueError("max_rebound_rateは0以上の有限値を指定してください。")
         df = self.df.select("code", "date", "close", "high", "low").filter(
             pl.col("date") <= valuation_date
         ).sort(["code", "date"])
@@ -1208,19 +1232,23 @@ class PricelistPl():
             pl.col("close").rolling_mean(75).over("code").alias("_ma75"),
             pl.col("high").rolling_max(60).over("code").alias("_high60"),
         ).with_columns(
-            pl.col("_ma25").shift(5).over("code").alias("_past25"),
+            (pl.col("_ma25") > pl.col("_ma25").shift(1).over("code"))
+            .fill_null(False).cast(pl.Int64).alias("_ma25_up"),
+            pl.col("_ma5").shift(1).over("code").alias("_previous_ma5"),
             pl.col("_ma75").shift(10).over("code").alias("_past75"),
             pl.col("high").shift(1).over("code").alias("_previous_high"),
-            (pl.col("close") < pl.col("_ma5")).shift(1).over("code").alias("_previous_below"),
+        )
+        df = df.with_columns(
+            pl.col("_ma25_up").rolling_sum(ma25_up_days).over("code").alias("_ma25_up_count")
         )
         targets = df.filter(
             (pl.col("date") == target_date)
             & (pl.col("_ma25") > pl.col("_ma75"))
-            & (pl.col("_ma25") > pl.col("_past25"))
             & (pl.col("_ma75") > pl.col("_past75"))
-            & (pl.col("close") >= pl.col("_ma5"))
+            & (pl.col("_ma5") > pl.col("_previous_ma5"))
+            & (pl.col("close") > pl.col("_ma5"))
+            & (pl.col("close") > pl.col("_ma25"))
             & (pl.col("close") > pl.col("_previous_high"))
-            & pl.col("_previous_below")
         ).select("code", pl.col("_i").alias("_target_i"), pl.col("close").alias("_close"))
         windows = df.join(targets, on="code", how="inner").filter(
             pl.col("_i") > pl.col("_target_i") - 25
@@ -1231,6 +1259,7 @@ class PricelistPl():
         ).filter(pl.col("_valid") == 25)
         peaks = windows.join(peaks, on="code").filter(
             (pl.col("_i") == pl.col("_peak_i"))
+            & (pl.col("_ma25_up_count") == ma25_up_days)
             & (pl.col("high") > 0) & (pl.col("high") == pl.col("_high60"))
         ).select("code", "_peak_i", pl.col("high").alias("_peak"))
         after = windows.join(peaks, on="code").filter(pl.col("_i") > pl.col("_peak_i"))
@@ -1238,15 +1267,22 @@ class PricelistPl():
             (pl.col("low").count() == pl.len()).alias("_valid_low"),
             pl.col("_i").filter(pl.col("low") == pl.col("low").min()).max().alias("_trough_i"),
         ).filter(pl.col("_valid_low"))
-        return after.join(troughs, on="code").filter(
+        after = after.join(troughs, on="code")
+        recoveries = after.filter(
+            (pl.col("_i") > pl.col("_trough_i"))
+            & (pl.col("_ma5") > pl.col("_previous_ma5"))
+            & (pl.col("close") > pl.col("_ma5"))
+            & (pl.col("close") > pl.col("_ma25"))
+        ).group_by("code").agg(pl.col("_i").min().alias("_recovery_i"))
+        return after.join(recoveries, on="code").filter(
+            (pl.col("_recovery_i") == pl.col("_target_i")) &
             (pl.col("_i") == pl.col("_trough_i"))
-            & (pl.col("_trough_i") - pl.col("_peak_i")).is_between(3, 15)
-            & (pl.col("_target_i") - pl.col("_trough_i")).is_between(1, 5)
-            & (pl.col("low") > 0) & (pl.col("_ma25") > 0)
-            & (pl.col("low") / pl.col("_ma25")).is_between(0.97, 1.03)
+            & (pl.col("_trough_i") - pl.col("_peak_i")).is_between(min_pullback_days, max_pullback_days, closed="left")
+            & (pl.col("_target_i") - pl.col("_trough_i")).is_between(min_low_age_days, max_low_age_days, closed="left")
+            & (pl.col("low") > 0)
             & ((pl.col("_peak") - pl.col("low")) / pl.col("_peak") * 100)
-            .is_between(decline_rate, 12)
-            & ((pl.col("_close") - pl.col("low")) / pl.col("low") * 100 <= 5)
+            .is_between(min_decline_rate, max_decline_rate, closed="left")
+            & ((pl.col("_close") - pl.col("low")) / pl.col("low") * 100 <= max_rebound_rate)
         ).select("code").unique().sort("code")
 
     def with_columns_moving_average(self, term, col="close") -> None:

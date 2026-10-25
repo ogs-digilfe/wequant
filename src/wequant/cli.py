@@ -323,17 +323,49 @@ def get_oshime(
         datetime | None,
         typer.Option(formats=["%Y-%m-%d"], help="評価日（YYYY-MM-DD）。省略時は今日。"),
     ] = None,
-    decline_rate: Annotated[float, typer.Option(help="押し目幅の最小下落率（%）。0以上12以下。")] = 5.0,
+    min_decline_rate: Annotated[float, typer.Option(help="押し目幅の下落率の下限（%、含む）。")] = 5.0,
+    max_decline_rate: Annotated[float, typer.Option(help="押し目幅の下落率の上限（%、含まない）。")] = 12.0,
+    min_pullback_days: Annotated[int, typer.Option(min=1, help="調整期間の下限（営業日、含む）。")] = 3,
+    max_pullback_days: Annotated[int, typer.Option(min=1, help="調整期間の上限（営業日、含まない）。")] = 16,
+    min_low_age_days: Annotated[int, typer.Option(min=1, help="安値からの経過日数の下限（営業日、含む）。")] = 1,
+    max_low_age_days: Annotated[int, typer.Option(min=1, help="安値からの経過日数の上限（営業日、含まない）。")] = 6,
+    max_rebound_rate: Annotated[float, typer.Option(help="安値から終値への最大反発率（%、含む）。")] = 10.0,
+    ma25_up_days: Annotated[int, typer.Option(min=1, help="高値日までのMA25連続上昇日数。")] = 50,
 ):
     """調整済み株価から押し目ねらいの候補銘柄を表示する。"""
     from math import isfinite
 
-    if not isfinite(decline_rate) or not 0 <= decline_rate <= 12:
-        raise typer.BadParameter("0以上12以下の有限値を指定してください。", param_hint="--decline-rate")
+    if (not isfinite(min_decline_rate) or not isfinite(max_decline_rate)
+            or not 0 <= min_decline_rate < max_decline_rate <= 100):
+        raise typer.BadParameter(
+            "有限値で0 <= min < max <= 100を指定してください。",
+            param_hint="--min-decline-rate / --max-decline-rate",
+        )
+    if min_pullback_days >= max_pullback_days:
+        raise typer.BadParameter(
+            "下限は上限未満にしてください。",
+            param_hint="--min-pullback-days / --max-pullback-days",
+        )
+    if min_low_age_days >= max_low_age_days:
+        raise typer.BadParameter(
+            "下限は上限未満にしてください。",
+            param_hint="--min-low-age-days / --max-low-age-days",
+        )
+    if not isfinite(max_rebound_rate) or max_rebound_rate < 0:
+        raise typer.BadParameter(
+            "0以上の有限値を指定してください。", param_hint="--max-rebound-rate",
+        )
     try:
         result = get_oshime_flow(
             valuation_date=valuation_date.date() if valuation_date else date.today(),
-            decline_rate=decline_rate,
+            min_decline_rate=min_decline_rate,
+            max_decline_rate=max_decline_rate,
+            ma25_up_days=ma25_up_days,
+            min_pullback_days=min_pullback_days,
+            max_pullback_days=max_pullback_days,
+            min_low_age_days=min_low_age_days,
+            max_low_age_days=max_low_age_days,
+            max_rebound_rate=max_rebound_rate,
         )
     except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
         typer.echo(f"押し目候補を取得できません: {exc}", err=True)

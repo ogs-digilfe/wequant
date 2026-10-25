@@ -621,15 +621,52 @@ class PricelistFig():
         self.fig = fig
         self._update_layout()
     
+    def add_trace_moving_average(self, term: int = 25) -> None:
+        """表示期間内の終値のterm本単純移動平均を上段へ追加・更新する。
+
+        日付昇順で当日を含めて計算し、期間不足・窓内の欠損はnullにする。
+        同じ期間のtraceは更新し、異なる期間は併記する。self.dfは変更しない。
+        """
+        if isinstance(term, bool) or not isinstance(term, int) or term <= 0:
+            raise ValueError("term must be a positive integer")
+
+        df = self.df.sort("date")
+        values = df["close"].rolling_mean(window_size=term).to_list()
+        trace_id = f"wequant.moving_average.{term}"
+        for trace in self.fig.data:
+            if trace.meta == trace_id:
+                trace.update(x=df["date"].to_list(), y=values)
+                return
+
+        self.fig.add_trace(
+            go.Scatter(
+                x=df["date"].to_list(),
+                y=values,
+                mode="lines",
+                name=f"MA{term}",
+                line=dict(width=1),
+                meta=trace_id,
+                connectgaps=False,
+            ),
+            row=1, col=1,
+        )
+
     # 指定した日に縦線を引く
     # colorで、引く線の色を指定できるが、plotlyのcolorlabelでのみ指定可能とした。
     # ただし、start_date > target_date or end_date < target_dateの場合は無視される
     def add_vline(self, target_date: date, color: str="grey") -> None:
+        """指定日以前の直近の表示取引日に縦線を引く。該当日がなければ描画しない。"""
         if self.start_date > target_date or self.end_date < target_date:
             return
 
+        dates = self.df.filter(
+            pl.col("date") <= target_date.strftime(DATEFORMAT)
+        )["date"]
+        if dates.is_empty():
+            return
+
         self.fig.add_vline(
-            x=target_date.strftime(DATEFORMAT),
+            x=dates.max(),
             line=dict(color=color, width=1),  # 色やスタイルのカスタマイズ
             opacity=0.5
         )
