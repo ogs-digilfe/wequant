@@ -11,6 +11,7 @@ import polars as pl
 import typer
 
 from wequant.flows.download_data import download_data_flow
+from wequant.flows.new_highs import new_highs_flow
 from wequant.flows.oshime import get_oshime_flow
 from wequant.flows.price_history import price_history_flow
 from wequant.flows.print_parquet import print_parquet_flow
@@ -375,6 +376,42 @@ def get_oshime(
     def width(value: str) -> int:
         return sum(0 if combining(c) else 2 if east_asian_width(c) in ("W", "F") else 1 for c in value)
 
+    widths = [max(width(col), max((width(row[i]) for row in rows), default=0))
+              for i, col in enumerate(result.columns)]
+    for row in [result.columns, *rows]:
+        typer.echo("  ".join(value + " " * (size - width(value))
+                             for value, size in zip(row, widths)).rstrip())
+    if result.is_empty():
+        typer.echo("該当データなし", err=True)
+
+
+@app.command()
+def new_highs(
+    start_date: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"], help="開始日（含む、YYYY-MM-DD）。省略時は制限なし。")] = None,
+    end_date: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"], help="終了日（含む、YYYY-MM-DD）。省略時は制限なし。")] = None,
+    min_prev_high: Annotated[int | None, typer.Option(min=1, help="前の最高値からの取引日数の下限（含む）。")] = None,
+):
+    """調整済み株価の新高値をdate昇順・prev-high降順で表示する。"""
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise typer.BadParameter("開始日は終了日以下にしてください。", param_hint="--start-date")
+    try:
+        result = new_highs_flow(
+            start_date=start_date.date() if start_date else None,
+            end_date=end_date.date() if end_date else None,
+            min_prev_high=min_prev_high,
+        )
+    except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
+        typer.echo(f"新高値銘柄を取得できません: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    def width(value: str) -> int:
+        return sum(0 if combining(c) else 2 if east_asian_width(c) in ("W", "F") else 1 for c in value)
+
+    def cell(value: object) -> str:
+        text = "null" if value is None else str(value)
+        return text.replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+
+    rows = [[cell(v) for v in row] for row in result.iter_rows()]
     widths = [max(width(col), max((width(row[i]) for row in rows), default=0))
               for i, col in enumerate(result.columns)]
     for row in [result.columns, *rows]:

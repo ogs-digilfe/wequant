@@ -76,6 +76,15 @@ DataFrameと指数のDataFrameを渡し、今回・次回の発表翌取引日�
 件数を標準エラーへ通知して除外します。Flowは取得コードと`codes`の共通部分を
 既存の加工Taskへ渡します。フラグ未指定時はポートフォリオを読み込みません。
 
+`flows/new_highs.py`は`tasks/new_highs.py`の`load_new_highs_inputs`で
+調整済み株価と銘柄一覧を読み込み、`build_new_highs`で結果を組み立てます。
+新高値の判定と経過取引日数の計算・期間および日数での抽出は
+`PricelistPl.get_new_highs`に集約します。同メソッドは保持データを変更せず、
+銘柄別の日付順で当日のhighと前日までの最高値を比較します。
+同値最高値は最後の行を日数計算の基準とし、指定期間より前の履歴も使用します。
+Taskは銘柄名を左結合し、date/code/name/prev-highをdate昇順・prev-high降順で返します。
+CLIは日付と日数の入力検証および全件表示を担当し、保存は行いません。
+
 Task・Flowは通常のPython関数であり、実行基盤の追加依存はありません。
 
 ### 設定と外部通信

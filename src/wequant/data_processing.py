@@ -811,6 +811,51 @@ class PricelistPl():
         """管理対象のParquetを読み込み、通常の初期化を行う。省略時は既定ファイル。"""
         return cls(df=load_data_file(fp))
 
+    def get_new_highs(
+        self, *, start_date: date | None = None, end_date: date | None = None,
+        min_prev_high: int | None = None,
+    ) -> pl.DataFrame:
+        """履歴内の最高highを厳密に更新したdate/code/prev-highを返す。
+
+        code、date（Date型）、high（数値型）が必要。同一code/dateは一意。
+        銘柄別の日付順の行数差を取引日数とし、同値高値は最後の日を基準にする。
+        初日は除外。null・非有限highは比較対象外だが日数には数える。
+        日付境界と日数下限を含む。期間抽出は計算後。self.dfは変更しない。
+        date昇順・prev-high降順で返し、空入力も出力スキーマを保持する。
+        """
+        if start_date is not None and end_date is not None and start_date > end_date:
+            raise ValueError("開始日は終了日以下にしてください。")
+        if min_prev_high is not None and (type(min_prev_high) is not int or min_prev_high < 1):
+            raise ValueError("min_prev_highは1以上の整数にしてください。")
+        df = self.df.select("code", "date", "high")
+        if df.schema["date"] != pl.Date:
+            raise ValueError("dateはDate型にしてください。")
+        if df.select(pl.any_horizontal(pl.col("code").is_null(), pl.col("date").is_null()).any()).item():
+            raise ValueError("codeとdateにnullは使用できません。")
+        if df.select(pl.struct("code", "date").is_duplicated().any()).item():
+            raise ValueError("同一code/dateの重複は使用できません。")
+        df = df.sort("code", "date").with_columns(
+            pl.int_range(pl.len(), dtype=pl.Int64).over("code").alias("_i"),
+            pl.when(pl.col("high").is_finite()).then(pl.col("high")).otherwise(None).alias("_high"),
+        ).with_columns(
+            pl.col("_high").cum_max().forward_fill().over("code").alias("_max"),
+        ).with_columns(
+            pl.when(pl.col("_high") == pl.col("_max")).then(pl.col("_i"))
+            .otherwise(None).forward_fill().over("code").alias("_peak_i"),
+        ).with_columns(
+            pl.col("_max").shift(1).over("code").alias("_prev_max"),
+            (pl.col("_i") - pl.col("_peak_i").shift(1).over("code")).alias("prev-high"),
+        ).filter(pl.col("_high") > pl.col("_prev_max"))
+        if start_date is not None:
+            df = df.filter(pl.col("date") >= start_date)
+        if end_date is not None:
+            df = df.filter(pl.col("date") <= end_date)
+        if min_prev_high is not None:
+            df = df.filter(pl.col("prev-high") >= min_prev_high)
+        return df.select("date", "code", "prev-high").sort(
+            ["date", "prev-high"], descending=[False, True], maintain_order=True,
+        )
+
     # PricelistPlをdailyからweeklyに変更する。
     # 変更される列は、open, high, low, close, volumeのみ。
     # with_columns_*メソッド等で後から追加された統計データ列は、すべて集約関数last()の実行結果である週最終営業日のデータに変換されるので要注意。
