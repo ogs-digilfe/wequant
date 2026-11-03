@@ -61,6 +61,15 @@ uv run python -m unittest discover -s tests -v
 
 単体テストは外部通信を行いません。
 
+過去の調整済み株価による売買シミュレーションも実行できます（ローカルデータが必要）。
+
+```bash
+uv run wq sim threshold --entry 2024-04-01:7203 --take-profit 10 --stop-loss 5
+```
+
+既定では指定日の翌取引日の始値で購入し、終値で閾値を判定して翌取引日の始値で売却します。
+オプションと計算ルールは[CLIリファレンス](docs/REFERENCE.md#売買シミュレーション-wq-sim-threshold)を参照してください。
+
 ## ドキュメント
 
 - [ユーザーガイド](docs/USERGUIDE.md): コマンドを使った分析用データの準備手順

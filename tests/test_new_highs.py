@@ -1,4 +1,8 @@
 from datetime import date
+import json
+import shutil
+import subprocess
+import sys
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -107,3 +111,48 @@ class NewHighsTests(TestCase):
         result = runner.invoke(app, ['new-highs'])
         self.assertEqual(result.exit_code, 1)
         self.assertIn('新高値銘柄を取得できません', result.stderr)
+
+
+    @patch('wequant.cli.new_highs_flow')
+    def test_output_modes_and_xargs_arguments(self, flow):
+        flow.return_value = pl.DataFrame({
+            'date': [date(2026, 1, 9), date(2026, 1, 13)],
+            'code': ['130A', '7203'], 'name': ['企業A', '企業B'], 'prev-high': [2, 1],
+        })
+        runner = CliRunner()
+        standard = runner.invoke(app, ['new-highs', '--output-mode', 'standard'])
+        default = runner.invoke(app, ['new-highs'])
+        self.assertEqual(standard.exit_code, 0, standard.output)
+        self.assertEqual(standard.stdout, default.stdout)
+        result = runner.invoke(app, ['new-highs', '--output-mode', 'sim',
+                                     '--start-date', '2026-01-09', '--min-prev-high', '1'])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.stdout, '--entry 2026-01-09:130A --entry 2026-01-13:7203\n')
+        self.assertEqual(result.stderr, '')
+        flow.assert_called_with(start_date=date(2026, 1, 9), end_date=None, min_prev_high=1)
+        if shutil.which('xargs') is None:
+            self.skipTest('xargs is unavailable')
+        # Exercise the actual argument conversion without reading prices or running a shell.
+        received = subprocess.run(
+            ['xargs', '-r', sys.executable, '-c',
+             'import json, sys; print(json.dumps(sys.argv[1:]))'],
+            input=result.stdout, text=True, capture_output=True, check=True,
+        )
+        self.assertEqual(json.loads(received.stdout),
+                         ['--entry', '2026-01-09:130A', '--entry', '2026-01-13:7203'])
+        flow.return_value = flow.return_value.head(0)
+        empty = runner.invoke(app, ['new-highs', '--output-mode', 'sim'])
+        self.assertEqual(empty.exit_code, 0, empty.output)
+        self.assertEqual(empty.stdout, '')
+        self.assertIn('該当データなし', empty.stderr)
+        received = subprocess.run(
+            ['xargs', '-r', sys.executable, '-c', 'print("unexpected")'],
+            input=empty.stdout, text=True, capture_output=True, check=True,
+        )
+        self.assertEqual(received.stdout, '')
+
+    @patch('wequant.cli.new_highs_flow')
+    def test_invalid_output_mode(self, flow):
+        result = CliRunner().invoke(app, ['new-highs', '--output-mode', 'unknown'])
+        self.assertEqual(result.exit_code, 2, result.output)
+        flow.assert_not_called()

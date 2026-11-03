@@ -84,6 +84,8 @@ DataFrameと指数のDataFrameを渡し、今回・次回の発表翌取引日�
 同値最高値は最後の行を日数計算の基準とし、指定期間より前の履歴も使用します。
 Taskは銘柄名を左結合し、date/code/name/prev-highをdate昇順・prev-high降順で返します。
 CLIは日付と日数の入力検証および全件表示を担当し、保存は行いません。
+`new-highs --output-mode sim`では、同じ抽出結果をxargs用の`--entry`引数列として
+標準出力します。出力形式の切り替えはCLIで行い、Task・Flowの戻り値は変更しません。
 
 Task・Flowは通常のPython関数であり、実行基盤の追加依存はありません。
 
@@ -549,3 +551,16 @@ CLIからFlow・Task経由で加工メソッドへ渡します。整数で`1 <= 
 MA5回復は安値翌日から対象日まででMA5 > 前日MA5、終値 > 当日MA5、終値 > 当日MA25が
 初めて同時成立する日を求め、対象日との一致を要求します。前日終値のMA5未満は要求しません。
 初回はこの3条件だけで決め、他の抽出条件は対象日に別途判定します。
+
+### 閾値売買シミュレーション
+
+`wq sim threshold`は`flows/simulation.py`の`threshold_simulation_flow`へ委譲します。
+`tasks/simulation.py`の`load_simulation_inputs`で調整済み株価・銘柄一覧・日経平均を
+既存クラスの`from_file()`から読み込み、`build_threshold_simulation`で
+`PricelistPl.get_threshold_simulation`を呼び出して銘柄名と出力列を整えます。
+加工メソッドは指数DataFrameを明示的に受け取り、入力・保持データを変更せず、
+入力順と重複指定を保持します。日中判定・終値判定およびベンチマーク計算は同メソッドへ
+集約し、両閾値到達時は株価・指数の騰落率をともに0とします。
+`file`指定時はFlowから`save_threshold_simulation`を呼び出し、Git管理対象外の
+`data/output/sim/`へ排他的にCSVを作成します。CLIは入力検証と表示を担当します。
+新しい実行基盤・依存ライブラリは追加しません。

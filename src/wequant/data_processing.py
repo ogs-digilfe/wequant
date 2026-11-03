@@ -811,6 +811,119 @@ class PricelistPl():
         """管理対象のParquetを読み込み、通常の初期化を行う。省略時は既定ファイル。"""
         return cls(df=load_data_file(fp))
 
+    def get_threshold_simulation(
+        self, entries: list[tuple[date, str]], *, take_profit: float,
+        stop_loss: float, index_df: pl.DataFrame,
+        entry_mode: str = "next-open", exit_mode: str = "next-open",
+    ) -> pl.DataFrame:
+        """購入指定の順に独立した閾値売買を計算する。保持データは変更しない。
+
+        株価はcode/date/open/high/low/close、指数はdate/open/closeが必要。
+        dateはDate型、銘柄内日付と指数日付は一意。価格は正の有限値。
+        率は正数の%指定。購入当日から判定し、同日両閾値は騰落・指数とも0。
+        指数は購入日始値から売却日始値(next-open)または終値(intraday)。
+        日付は完全一致で照合する。未決済・不足データの価格や率はnull。
+        無効な株価はその入力をinvalid_dataとし、指数の欠損・無効値はnull。
+        入力順・重複指定を保持し、出力率は%（丸めなし）。
+        """
+        from decimal import Decimal
+        from math import isfinite
+
+        if entry_mode not in ("open", "next-open") or exit_mode not in ("intraday", "next-open"):
+            raise ValueError("売買モードが不正です。")
+        if any(not isfinite(v) or v <= 0 for v in (take_profit, stop_loss)):
+            raise ValueError("利確率・損切り率は正の有限値にしてください。")
+        prices = self.df.select("code", "date", "open", "high", "low", "close").with_columns(
+            pl.col("code").cast(pl.String))
+        index = index_df.select("date", "open", "close")
+        for frame, keys in ((prices, ["code", "date"]), (index, ["date"])):
+            if frame.schema["date"] != pl.Date:
+                raise ValueError("dateはDate型にしてください。")
+            if frame.select(pl.any_horizontal(pl.col(keys).is_null()).any()).item():
+                raise ValueError("日付・銘柄コードにnullは使用できません。")
+            if frame.select(pl.struct(keys).is_duplicated().any()).item():
+                raise ValueError("同一日付・銘柄のデータが重複しています。")
+
+        def valid(value):
+            return value is not None and isfinite(value) and value > 0
+
+        # 指定銘柄・指定日以降だけをPythonへ展開し、全市場履歴の複製を避ける。
+        selected = prices.filter(pl.col("code").is_in([str(code) for _, code in entries]))
+        if entries:
+            selected = selected.filter(pl.col("date") >= min(day for day, _ in entries))
+        groups = {key[0]: frame.sort("date").to_dicts()
+                  for key, frame in selected.partition_by("code", as_dict=True).items()}
+        indices = {row["date"]: row for row in index.iter_rows(named=True)}
+        schema = {"code": pl.String, "requested_entry_date": pl.Date,
+                  "entry_date": pl.Date, "entry_price": pl.Float64,
+                  "exit_date": pl.Date, "exit_price": pl.Float64,
+                  "exit_reason": pl.String, "status": pl.String,
+                  "updown": pl.Float64, "benchmark": pl.Float64}
+        results = []
+        for requested_date, code in entries:
+            result = dict.fromkeys(schema)
+            result.update(code=str(code), requested_entry_date=requested_date, status="no_data")
+            rows = [row for row in groups.get(str(code), [])
+                    if row["date"] >= requested_date and
+                    (entry_mode == "open" or row["date"] > requested_date)]
+            if not rows:
+                results.append(result)
+                continue
+            first = rows[0]
+            result["entry_date"] = first["date"]
+            if not valid(first["open"]):
+                result["status"] = "invalid_data"
+                results.append(result)
+                continue
+            entry_price = first["open"]
+            result.update(entry_price=entry_price, status="unclosed")
+            base = Decimal(str(entry_price))
+            upper = base * (1 + Decimal(str(take_profit)) / 100)
+            lower = base * (1 - Decimal(str(stop_loss)) / 100)
+            for i, row in enumerate(rows):
+                needed = ("open", "high", "low") if exit_mode == "intraday" else ("close",)
+                if any(not valid(row[col]) for col in needed):
+                    result["status"] = "invalid_data"
+                    break
+                if exit_mode == "intraday":
+                    hit_profit = Decimal(str(row["high"])) >= upper
+                    hit_loss = Decimal(str(row["low"])) <= lower
+                    if hit_profit and hit_loss:
+                        result.update(exit_date=row["date"], exit_reason="both_thresholds",
+                                      status="closed", updown=0., benchmark=0.)
+                        break
+                    opening = Decimal(str(row["open"]))
+                    if opening >= upper or opening <= lower:
+                        reason = "take-profit" if opening >= upper else "stop-loss"
+                        price = row["open"]
+                    elif hit_profit or hit_loss:
+                        reason = "take-profit" if hit_profit else "stop-loss"
+                        price = float(upper if hit_profit else lower)
+                    else:
+                        continue
+                    sell_date = row["date"]
+                else:
+                    closing = Decimal(str(row["close"]))
+                    if closing < upper and closing > lower:
+                        continue
+                    reason = "take-profit" if closing >= upper else "stop-loss"
+                    if i + 1 == len(rows):
+                        break
+                    following = rows[i + 1]
+                    if not valid(following["open"]):
+                        result["status"] = "invalid_data"
+                        break
+                    sell_date, price = following["date"], following["open"]
+                result.update(exit_date=sell_date, exit_price=price, exit_reason=reason,
+                              status="closed", updown=float((Decimal(str(price)) / base - 1) * 100))
+                start = indices.get(first["date"], {}).get("open")
+                end = indices.get(sell_date, {}).get("open" if exit_mode == "next-open" else "close")
+                if valid(start) and valid(end):
+                    result["benchmark"] = (end / start - 1) * 100
+                break
+            results.append(result)
+        return pl.DataFrame(results, schema=schema)
+
     def get_new_highs(
         self, *, start_date: date | None = None, end_date: date | None = None,
         min_prev_high: int | None = None,

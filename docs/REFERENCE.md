@@ -24,6 +24,7 @@ uv run wq <command> --help
 | [prepare-quarterly-valuation](#prepare-quarterly-valuation) | 四半期評価データセットを加工・保存 |
 | [get-oshime](#get-oshime-押し目候補の抽出) | 押し目候補の銘柄を抽出 |
 | [new-highs](#new-highs-新高値銘柄の抽出) | 新高値更新を期間・経過取引日数で抽出 |
+| [sim threshold](#売買シミュレーション-wq-sim-threshold) | 利確・損切り条件による売買をシミュレーション |
 
 ## `get-app-name`
 
@@ -664,6 +665,7 @@ uv run wq new-highs --start-date 2026-10-23 --end-date 2026-10-23
 | `--start-date` | YYYY-MM-DD・制限なし | 指定日以降の更新を抽出（当日を含む） |
 | `--end-date` | YYYY-MM-DD・制限なし | 指定日以前の更新を抽出（当日を含む） |
 | `--min-prev-high` | 1以上の整数・制限なし | `prev-high`が指定値以上の更新を抽出 |
+| `--output-mode` | `standard` | `standard`は一覧表、`sim`はxargs用の`--entry`引数を標準出力 |
 
 `reviced_pricelist.parquet`を`PricelistPl.from_file()`経由で読み込み、
 銘柄別に当日の`high`が前日までの履歴内最高値を厳密に上回った行を抽出します。
@@ -671,7 +673,7 @@ uv run wq new-highs --start-date 2026-10-23 --end-date 2026-10-23
 上場からの履歴が不足する場合には上場来高値を保証しません。
 期間条件は計算後に適用し、開始日より前の履歴も判定に使用します。
 
-出力は`date`, `code`, `name`, `prev-high`。1行は1銘柄の1更新日です。
+`standard`の出力は`date`, `code`, `name`, `prev-high`。1行は1銘柄の1更新日です。
 `date`昇順（古い順）、同日の中では`prev-high`降順に全件表示します。
 `prev-high`は更新前の最高値を最後に付けた日からの銘柄別の株価レコード数の差で、
 連日更新なら1、株価レコードがない日は数えません。
@@ -682,3 +684,104 @@ null・非有限の`high`は高値比較から除外しますが、その行は�
 0件でも見出しを標準出力し、標準エラーに「該当データなし」を表示して正常終了します。
 不正な日付・開始日が終了日より後・不正な日数は終了コード2、
 読み込みや加工の失敗は終了コード1です。外部通信やファイル保存は行いません。
+
+### シミュレーションへの引き渡し
+
+`--output-mode sim`は同じ抽出条件・並び順で、見出しなしの
+`--entry YYYY-MM-DD:CODE --entry YYYY-MM-DD:CODE ...`を1行で標準出力します。
+パイプがなければ引数文字列だけを表示します。0件なら標準出力は空で、
+「該当データなし」は標準エラーへ表示します。
+
+```bash
+uv run wq new-highs --min-prev-high 100 --output-mode sim \
+  | xargs -r uv run wq sim threshold --take-profit 10 --stop-loss 5
+```
+
+新高値は当日の高値で判定するため、購入は既定の`next-open`が適しています。
+`xargs`の共通の扱いは次節を参照してください。
+
+## 売買シミュレーション: `wq sim threshold`
+
+調整済み株価`reviced_pricelist.parquet`、銘柄一覧`meigaralist.parquet`、
+日経平均`nh225.parquet`を読み込み、利確・損切り条件による売買を再現します。
+外部通信は行いません。各購入指定は独立し、資金制約はありません。
+
+```bash
+uv run wq sim threshold \
+  --entry 2024-04-01:7203 --entry 2024-04-03:6758 \
+  --take-profit 10 --stop-loss 5
+
+uv run wq sim threshold --entry 2024-04-01:7203 \
+  --take-profit 10 --stop-loss 5 --entry-mode open \
+  --exit-mode intraday --output-mode file
+```
+
+| オプション | 既定値 | 意味 |
+| --- | --- | --- |
+| `--entry` | 必須 | `YYYY-MM-DD:CODE`。空白なし。繰り返し指定可能 |
+| `--take-profit` | 必須 | 利確率（正の有限値、%） |
+| `--stop-loss` | 必須 | 損切り率（正の有限値、%）。5なら購入価格から5%下落 |
+| `--entry-mode` | `next-open` | `open`または`next-open` |
+| `--exit-mode` | `next-open` | `intraday`または`next-open` |
+| `--output-mode` | `standard` | `standard`は表を標準出力、`file`はCSV保存し保存先を表示 |
+
+### 抽出コマンドとの連携（xargs）
+
+`--entry YYYY-MM-DD:CODE`形式を標準出力する抽出コマンドは、
+`抽出コマンド | xargs -r uv run wq sim threshold --take-profit 10 --stop-loss 5`
+で接続できます。`xargs`は標準入力を引数へ変換し、`-r`は空入力時の実行を抑止します
+（GNU xargs）。例は前節の`new-highs`を参照してください。
+大量の入力は複数回に分けて実行され、結果も実行ごとに出力される場合があります。
+
+### 購入と手じまい
+
+- `open`は指定日以降で最初に価格データがある日の始値で購入します。
+- `next-open`は指定日より後で最初に価格データがある日の始値で購入します。
+  どちらも指定日が休場日なら、通常は次の営業日です。
+- 購入当日から判定し、購入価格に対する利確価格以上・損切り価格以下で条件成立です。
+- `intraday`は高値・安値で判定します。同日に両方の閾値へ到達した場合は、
+  始値の判定より優先して`updown`・`benchmark`をともに0とします。
+  `exit_date`は当日、`exit_price`は空欄、`exit_reason`は`both_thresholds`です。
+- `intraday`で両閾値到達がなければ、始値が閾値に到達・飛び越えた場合は始値で売却し、
+  それ以外は到達した閾値の価格で売却します。
+- `next-open`は終値だけで判定し、成立した次の取引日の始値で売却します。
+  日中や始値で閾値へ到達しても、それだけでは売却しません。
+- 条件未達や売却に必要な翌日のデータがない場合は未決済です。強制売却しません。
+- 手数料・税金・配当・スリッページは考慮しません。調整済み価格による計算です。
+
+### 出力
+
+入力順と重複指定を保持し、1指定につき1行を返します。標準出力の欠損は`null`、
+CSVの欠損は空欄です。
+
+| 列 | 内容 |
+| --- | --- |
+| `code` | 銘柄コード（文字列） |
+| `name` | 銘柄名。銘柄一覧にない場合は欠損 |
+| `requested_entry_date` | 入力で指定した日 |
+| `entry_date` | 実際の購入日 |
+| `entry_price` | 購入価格 |
+| `exit_date` | 手じまい日 |
+| `exit_price` | 売却価格 |
+| `exit_reason` | `take-profit`、`stop-loss`、`both_thresholds`。未決済等は欠損 |
+| `status` | `closed`、`unclosed`、`no_data`、`invalid_data` |
+| `updown` | `(exit_price / entry_price - 1) × 100`（%）。両閾値到達時は0 |
+| `benchmark` | 同期間の日経平均の騰落率（%）。両閾値到達時は0 |
+
+日経平均は購入日の始値から、売却日の始値（`next-open`）または終値
+（`intraday`の近似）までを計算します。日付は完全一致で照合し、指数の該当日がない、
+価格が欠損・0以下・非有限の場合は`benchmark`を欠損とします。
+
+`unclosed`は未決済、`no_data`は該当銘柄・購入対象日のデータなしです。
+これらの売却価格・騰落率は欠損です。判定に必要な株価が欠損・0以下・非有限の場合は
+`invalid_data`としてその指定の処理を中断し、残りの指定は続行します。
+日付・コードの欠損や同一銘柄・日付の重複、指数日付の重複など、入力データの
+構造に問題がある場合は実行全体をエラーにします。
+
+CSVは`data/output/sim/threshold-YYYYmmddHHMMSS.csv`へUTF-8で保存します。
+日時は保存時の日本時間です。ディレクトリは自動作成し、同名ファイルがあれば
+上書きせずエラーにします。CSV自体は型情報を持たないため、読み込み時は
+`code`を文字列に指定してください。例：
+`pl.read_csv(path, schema_overrides={"code": pl.String}, try_parse_dates=True)`。
+
+ヘルプは`uv run wq sim --help`、`uv run wq sim threshold --help`で確認できます。

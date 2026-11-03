@@ -4,6 +4,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from pathlib import Path
 import re
+from shlex import quote
 from typing import Annotated, Literal
 from unicodedata import combining, east_asian_width
 
@@ -385,11 +386,17 @@ def get_oshime(
         typer.echo("該当データなし", err=True)
 
 
+class NewHighsOutputMode(str, Enum):
+    standard = "standard"
+    sim = "sim"
+
+
 @app.command()
 def new_highs(
     start_date: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"], help="開始日（含む、YYYY-MM-DD）。省略時は制限なし。")] = None,
     end_date: Annotated[datetime | None, typer.Option(formats=["%Y-%m-%d"], help="終了日（含む、YYYY-MM-DD）。省略時は制限なし。")] = None,
     min_prev_high: Annotated[int | None, typer.Option(min=1, help="前の最高値からの取引日数の下限（含む）。")] = None,
+    output_mode: Annotated[NewHighsOutputMode, typer.Option(help="standard: 一覧表 / sim: xargs用の--entry引数。")] = NewHighsOutputMode.standard,
 ):
     """調整済み株価の新高値をdate昇順・prev-high降順で表示する。"""
     if start_date is not None and end_date is not None and start_date > end_date:
@@ -403,6 +410,17 @@ def new_highs(
     except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
         typer.echo(f"新高値銘柄を取得できません: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+
+    if output_mode == NewHighsOutputMode.sim:
+        arguments = [
+            f"--entry {quote(f'{day.isoformat()}:{code}')}"
+            for day, code in result.select("date", "code").iter_rows()
+        ]
+        if arguments:
+            typer.echo(" ".join(arguments))
+        else:
+            typer.echo("該当データなし", err=True)
+        return
 
     def width(value: str) -> int:
         return sum(0 if combining(c) else 2 if east_asian_width(c) in ("W", "F") else 1 for c in value)
@@ -419,3 +437,62 @@ def new_highs(
                              for value, size in zip(row, widths)).rstrip())
     if result.is_empty():
         typer.echo("該当データなし", err=True)
+
+
+class SimulationEntryMode(str, Enum):
+    open = "open"
+    next_open = "next-open"
+
+
+class SimulationExitMode(str, Enum):
+    intraday = "intraday"
+    next_open = "next-open"
+
+
+class SimulationOutputMode(str, Enum):
+    standard = "standard"
+    file = "file"
+
+
+sim_app = typer.Typer(help="過去の株価による売買シミュレーション")
+app.add_typer(sim_app, name="sim")
+
+
+@sim_app.command("threshold")
+def simulate_threshold(
+    entry: Annotated[list[str], typer.Option(help="YYYY-MM-DD:CODE。繰り返し指定可能。")],
+    take_profit: Annotated[float, typer.Option(help="利確率（正数、%）。")],
+    stop_loss: Annotated[float, typer.Option(help="損切り率（正数、%）。")],
+    entry_mode: SimulationEntryMode = SimulationEntryMode.next_open,
+    exit_mode: SimulationExitMode = SimulationExitMode.next_open,
+    output_mode: SimulationOutputMode = SimulationOutputMode.standard,
+):
+    """購入価格に対する利確・損切り閾値で手じまいする。"""
+    from math import isfinite
+    from wequant.flows.simulation import threshold_simulation_flow
+
+    entries = []
+    for value in entry:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}:[^:\s]+", value):
+            raise typer.BadParameter("YYYY-MM-DD:CODEの形式で指定してください。", param_hint="--entry")
+        day, code = value.split(":")
+        try:
+            entries.append((date.fromisoformat(day), code))
+        except ValueError as exc:
+            raise typer.BadParameter("購入指定日が不正です。", param_hint="--entry") from exc
+    for flag, value in (("--take-profit", take_profit), ("--stop-loss", stop_loss)):
+        if not isfinite(value) or value <= 0:
+            raise typer.BadParameter("正の有限値を指定してください。", param_hint=flag)
+    try:
+        result, path = threshold_simulation_flow(
+            entries, take_profit=take_profit, stop_loss=stop_loss,
+            entry_mode=entry_mode.value, exit_mode=exit_mode.value, output_mode=output_mode.value,
+        )
+    except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
+        typer.echo(f"シミュレーションを実行できません: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if path is not None:
+        typer.echo(str(path))
+    else:
+        with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=240, fmt_str_lengths=80):
+            typer.echo(str(result))
