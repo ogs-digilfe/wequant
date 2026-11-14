@@ -32,6 +32,23 @@ def output_frame(count=1):
 
 class QuarterlyValuationCliTests(TestCase):
     @patch("wequant.cli.quarterly_valuation_flow")
+    def test_setd_option_and_invalid_date(self, flow):
+        flow.return_value = output_frame()
+        for args, expected in [
+            ([], None),
+            (["--setd", "2026-06-30"], date(2026, 6, 30)),
+        ]:
+            with self.subTest(args=args):
+                result = CliRunner().invoke(app, ["quarterly-valuation", *args])
+                self.assertEqual(result.exit_code, 0, result.exception)
+                self.assertEqual(flow.call_args.kwargs["setd"], expected)
+        for value in ("2026-02-30", "invalid"):
+            flow.reset_mock()
+            result = CliRunner().invoke(app, ["quarterly-valuation", "--setd", value])
+            self.assertNotEqual(result.exit_code, 0)
+            flow.assert_not_called()
+
+    @patch("wequant.cli.quarterly_valuation_flow")
     def test_quarter_display_and_column_order(self, flow):
         flow.return_value = output_frame(5).with_columns(pl.Series("qtr", [1, 2, 3, 4, None]))
         result = CliRunner().invoke(app, ["quarterly-valuation"])
@@ -203,7 +220,7 @@ class QuarterlyValuationCliTests(TestCase):
         self.assertEqual(result.exit_code, 0, result.exception)
         flow.assert_called_once_with(
             valuation_date=date(2026, 9, 19), sort_columns=["dgrp", "grsl"], sort_order="asc", codes=[7203, 6758],
-            sls_min=None, sls_max=None, grsl_min=None, grsl_max=None, portfolio=False, start_row=1, end_row=None, profit="operating", profit_min=None, profit_max=None, dgrp_min=None, dgrp_max=None, perf_period="quarter", pr_min=None, pr_max=None,
+            sls_min=None, sls_max=None, grsl_min=None, grsl_max=None, portfolio=False, start_row=1, end_row=None, profit="operating", profit_min=None, profit_max=None, dgrp_min=None, dgrp_max=None, perf_period="quarter", pr_min=None, pr_max=None, setd=None,
         )
 
     @patch("wequant.cli.quarterly_valuation_flow")
@@ -295,13 +312,13 @@ class QuarterlyValuationFlowTests(TestCase):
         load.return_value = (object(), object(), object(), object(), object())
         expected = build.return_value = output_frame()
         result = quarterly_valuation_flow(date(2026, 9, 19), ["grsl"], "asc", codes=[7203],
-                                          sls_min=100, sls_max=200, grsl_min=-10, grsl_max=50, start_row=2, end_row=5, profit="ordinary", profit_min=-20.5, profit_max=100, dgrp_min=-10, dgrp_max=30, perf_period="announcement", pr_min=-5, pr_max=20)
+                                          sls_min=100, sls_max=200, grsl_min=-10, grsl_max=50, start_row=2, end_row=5, profit="ordinary", profit_min=-20.5, profit_max=100, dgrp_min=-10, dgrp_max=30, perf_period="announcement", pr_min=-5, pr_max=20, setd=date(2026, 6, 30))
         self.assertIs(result, expected)
         load.assert_called_once_with()
         build.assert_called_once_with(
             *load.return_value, valuation_date=date(2026, 9, 19),
             sort_columns=["grsl"], sort_order="asc", codes=[7203],
-            sls_min=100, sls_max=200, grsl_min=-10, grsl_max=50, start_row=2, end_row=5, profit="ordinary", profit_min=-20.5, profit_max=100, dgrp_min=-10, dgrp_max=30, perf_period="announcement", pr_min=-5, pr_max=20,
+            sls_min=100, sls_max=200, grsl_min=-10, grsl_max=50, start_row=2, end_row=5, profit="ordinary", profit_min=-20.5, profit_max=100, dgrp_min=-10, dgrp_max=30, perf_period="announcement", pr_min=-5, pr_max=20, setd=date(2026, 6, 30),
         )
 
     @patch("wequant.tasks.quarterly_valuation.IndexPricelistPl.from_file")

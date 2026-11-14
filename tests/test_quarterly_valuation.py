@@ -58,7 +58,7 @@ class QuarterlyCalculationTests(TestCase):
         self.assertEqual(empty.schema, result.schema)
 
     def test_year_month_match_latest_and_date_boundaries(self):
-        lower = VALUATION_DATE - timedelta(days=93)
+        lower = VALUATION_DATE - timedelta(days=100)
         rows = [
             settlement(1, 2025, 100, 10),
             settlement(1, 2026, 120, 14),
@@ -280,6 +280,31 @@ class PriceAdjustmentTests(TestCase):
 
 
 class QuarterlyBuildTests(TestCase):
+    def test_setd_filter_after_latest_selection_before_slice(self):
+        source = kessan([
+            settlement(1, 2026, 100, 10, month=3, announced=date(2026, 7, 1)),
+            settlement(1, 2026, 120, 15),
+            settlement(2, 2026, 100, 10, month=3, announced=date(2026, 7, 1)),
+            settlement(3, 2026, 120, 15),
+        ])
+        names = MeigaralistPl(pl.DataFrame({"code": [1, 2, 3], "name": ["A", "B", "C"]}))
+        for options, expected in [
+            ({}, [1, 2, 3]),
+            ({"setd": date(2026, 3, 30)}, [2]),
+            ({"setd": date(2026, 6, 30)}, [1, 3]),
+            ({"setd": date(2026, 6, 30), "start_row": 2, "end_row": 2}, [3]),
+            ({"setd": date(2026, 6, 30), "codes": [2, 3], "sls_min": 120}, [3]),
+            ({"setd": date(2025, 6, 30)}, []),
+        ]:
+            with self.subTest(options=options):
+                result = build_quarterly_valuation(
+                    source, quotes([]), prices([]), names,
+                    valuation_date=VALUATION_DATE, sort_columns=["code"],
+                    sort_order="asc", **options,
+                )
+                self.assertEqual(result["code"].to_list(), expected)
+                self.assertEqual(result.columns, list(OUTPUT_COLUMNS))
+
     def test_join_sort_null_last_and_state(self):
         source = kessan([
             settlement(3, 2026, 120, 15),  # 比較先なしも行を残す。

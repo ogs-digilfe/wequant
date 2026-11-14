@@ -62,6 +62,9 @@ DataFrameと指数のDataFrameを渡し、今回・次回の発表翌取引日�
 次回は次の決算期の最初の四半期実績発表で、評価日より後の履歴も使用します。
 入力の状態は変更せず、次回発表や有効な始値がない場合はnullを返します。
 範囲フィルタは最新決算の選択後に丸め前の値へ適用します。
+`setd`はCLIで日付として解釈し、Flow経由で加工Taskへ渡します。
+最新決算選択後、ソート・行範囲指定の前に決算期末日の完全一致で絞り込みます。
+省略時は制限せず、不一致でも過去の決算へ戻りません。
 `dgrp_min`・`dgrp_max`はCLI・Flow・Taskとも%単位で受け取り、Taskで100で割って内部倍率と比較します。
 `profit`はCLIからFlow・加工Taskを経由して`KessanPl.get_quarterly_valuation`へ渡します。
 既定は営業利益（operating）、経常利益（ordinary）も選択できます。`prft`に選択利益、直後の`pr`に当期利益率（利益/売上×100、%）を返します。
@@ -454,7 +457,7 @@ CLIは先頭・末尾10行と保存先・件数を表示します。
 
 - `KessanPl.get_quarterly_valuation_dataset(pricelist_df, profit=...)`：
   決算期ごとの初回発表、株価履歴による翌取引日の評価日、当時判明していた比較決算を選びます。
-  全期間を対象とし、既存の日付による93日・1銘柄1行の制限は適用しません。
+  全期間を対象とし、既存の日付による100日・1銘柄1行の制限は適用しません。
 - `KessanPl.get_quarterly_performance_dataset(...)`：
   `code, setd`を保持して各決算の`perf, bm`を計算します。
 - `FinancequotePl.get_price_adjusted_valuations_for_dates(prices_df, valuation_dates_df)`：

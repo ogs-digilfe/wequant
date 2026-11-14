@@ -1609,11 +1609,11 @@ class KessanPl():
         self, valuation_date: date | None = None,
         profit: Literal["operating", "ordinary"] = "operating",
     ) -> pl.DataFrame:
-        """直近93日発表の最新四半期と前年同月の比較を返す（状態変更なし）。
+        """直近100日発表の最新四半期と前年同月の比較を返す（状態変更なし）。
 
         code、Date型settlement_date/announcement_date、settlement_type、数値型
         salesと、選択した利益列（operating_incomeまたはordinary_profit）を使用。四半期単体の元データを使い、累積化しない。
-        評価日当日以降の発表を除き、93日前を含む。銘柄ごとに決算期末日、発表日の
+        評価日当日以降の発表を除き、100日前を含む。銘柄ごとに決算期末日、発表日の
         順で最新行を選ぶ。前年同月も評価日前の履歴から同じ順で最新行を選ぶ。
         同一銘柄・期末日・発表日の異なる値はValueError、完全一致行はまとめる。
         戻り値はcode/setd/annd/qtr/sls/prft/pr/grsl/dgrp/ngrpr。金額の単位は入力のまま、
@@ -1652,7 +1652,7 @@ class KessanPl():
             pl.col("settlement_date").dt.month().alias("month"),
         ).sort(["code", "settlement_date", "announcement_date"])
         current = history.filter(
-            pl.col("announcement_date") >= valuation_date - timedelta(days=93)
+            pl.col("announcement_date") >= valuation_date - timedelta(days=100)
         ).unique(subset="code", keep="last", maintain_order=True)
         previous = history.unique(subset=["code", "year", "month"], keep="last").select(
             "code", (pl.col("year") + 1).alias("year"), "month",

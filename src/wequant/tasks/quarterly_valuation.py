@@ -67,6 +67,7 @@ def build_quarterly_valuation(
     perf_period: Literal["quarter", "announcement"] = "quarter",
     pr_min: float | None = None,
     pr_max: float | None = None,
+    setd: date | None = None,
 ) -> pl.DataFrame:
     """入力を変更せず15列の評価一覧を返す。nullは末尾、同値はcode昇順。
 
@@ -74,6 +75,7 @@ def build_quarterly_valuation(
     index_pricesはnh225の指数。省略時はbmをnullにする（既存呼び出し互換）。
     start_row/end_rowは抽出・ソート後の1始まりの範囲（両端を含む）。
     end_row=Noneは末尾まで。範囲が件数を超えた分は切り詰める。
+    setdは最新決算選択後の決算期末日との完全一致。Noneは制限なし。
     codes="all"は全銘柄、整数リストは指定銘柄のみ（空リストは0件）。
     sls/grsl/prft/dgrp/prの上下限は境界を含むAND条件。Noneは制限なし。
     条件を指定した列のnullは除外。sls・prftは元単位、grslは%で丸め前に比較する。
@@ -108,6 +110,8 @@ def build_quarterly_valuation(
     result = quarterly.join(valuations, on="code", how="left", validate="1:1")
     if codes != "all":
         result = result.filter(pl.col("code").is_in(codes))
+    if setd is not None:
+        result = result.filter(pl.col("setd") == setd)
     # 最新決算の選択後、丸め前の値で指定された全条件を適用する。
     for column, lower, upper in (
         ("sls", sls_min, sls_max),

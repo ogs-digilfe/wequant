@@ -44,7 +44,7 @@ FinancequotePl.dfは週に1回程度しかデータを取得していないの�
 以下をすべて満たすレコードを出力する
 
 - KessanPl.df["settlement_type"]=="四"
-- KessanPl.df["announcement_date"]が、valuation_dateより93日前以降
+- KessanPl.df["announcement_date"]が、valuation_dateより100日前以降
 - KessanPl.df["code"]が複数ある場合は、新しい方のレコードのみ
 
 ## コマンド名の合意

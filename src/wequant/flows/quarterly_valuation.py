@@ -32,6 +32,7 @@ def quarterly_valuation_flow(
     perf_period: Literal["quarter", "announcement"] = "quarter",
     pr_min: float | None = None,
     pr_max: float | None = None,
+    setd: date | None = None,
 ) -> pl.DataFrame:
     """評価日省略時は呼び出し時の今日を使い、評価一覧を返す。
 
@@ -52,6 +53,7 @@ def quarterly_valuation_flow(
         sort_columns=sort_columns,
         sort_order=sort_order,
         codes=codes,
+        setd=setd,
         sls_min=sls_min,
         sls_max=sls_max,
         grsl_min=grsl_min,

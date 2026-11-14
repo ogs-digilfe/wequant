@@ -88,6 +88,10 @@ def quarterly_valuation(
     ] = PerfPeriod.quarter,
     pr_min: Annotated[float | None, typer.Option(help="利益率prの下限（%、境界を含む）。")] = None,
     pr_max: Annotated[float | None, typer.Option(help="利益率prの上限（%、境界を含む）。")] = None,
+    setd: Annotated[
+        datetime | None,
+        typer.Option(formats=["%Y-%m-%d"], help="決算期末日が一致する行を抽出（YYYY-MM-DD）。"),
+    ] = None,
 ):
     """四半期ベースの銘柄評価一覧を表示する。"""
     if end_row is not None and start_row > end_row:
@@ -113,6 +117,7 @@ def quarterly_valuation(
         sort_columns=columns,
         sort_order=sort_order.value,
         codes=selected_codes,
+        setd=None if setd is None else setd.date(),
         sls_min=sls_min,
         sls_max=sls_max,
         grsl_min=grsl_min,
