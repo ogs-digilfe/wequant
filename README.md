@@ -42,6 +42,16 @@ WEQUANT_DELIVER_PASSWORD=replace-with-your-password
 `.env`より優先されます。秘密値をログ、Issue、チャット、Notebook出力へ
 記載しないでください。
 
+## Jupyter Labの起動
+
+```bash
+uv run wq start-jupyter
+uv run wq start-jupyter --port 8890 --hostname my-server
+```
+
+`notebooks/`で起動し、接続URLを標準出力します。Ctrl+Cで停止します。
+詳細は[CLIリファレンス](docs/REFERENCE.md)を参照してください。
+
 ## ビルド
 
 配布用のwheelとsource distributionを作成します。

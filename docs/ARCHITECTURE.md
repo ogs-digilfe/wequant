@@ -38,6 +38,14 @@ wequant/
 
 ### CLIとコマンド
 
+`start-jupyter`は`flows/start_jupyter.py`から`tasks/start_jupyter.py`の
+ホスト決定・起動Taskを呼び出します。libraryの`jupyter.py`はLAN IPv4の取得と
+`JupyterLabServer`による子プロセスの管理を担当します。
+リポジトリの`notebooks/`でuv経由で起動し、ポートの自動変更を禁止します。
+起動ログでURLを確認すると、コールバックでCLIへ専用トークン付きURLを通知します。
+CLIはURLを標準出力し、libraryはトークンを伏せたログを標準エラーへ流します。
+終了時は子プロセスグループを停止し、必要に応じて強制終了します。
+
 `cli.py`はTyperアプリケーションと公開コマンドを定義します。CLI固有の引数解釈や
 メッセージ表示にとどめ、まとまった処理は`flows/`以下へ委譲します。
 

@@ -12,6 +12,7 @@ import polars as pl
 import typer
 
 from wequant.flows.download_data import download_data_flow
+from wequant.flows.start_jupyter import start_jupyter_flow
 from wequant.flows.new_highs import new_highs_flow
 from wequant.flows.oshime import get_oshime_flow
 from wequant.flows.price_history import price_history_flow
@@ -20,6 +21,23 @@ from wequant.flows.quarterly_valuation import quarterly_valuation_flow
 from wequant.tasks.quarterly_valuation import OUTPUT_COLUMNS
 
 app = typer.Typer(help="wequant CLI")
+
+
+@app.command()
+def start_jupyter(
+    port: Annotated[int, typer.Option(min=1, max=65535, help="Jupyter Labのポート。")] = 8888,
+    hostname: Annotated[str | None, typer.Option(help="表示URLのホスト名。省略時はLAN IP。")] = None,
+):
+    """notebooks/でJupyter Labを起動する。Ctrl+Cで停止。"""
+    if hostname is not None and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", hostname) is None:
+        raise typer.BadParameter("ホスト名またはIPv4アドレスを指定してください。", param_hint="--hostname")
+    try:
+        start_jupyter_flow(port=port, hostname=hostname, on_ready=lambda url: typer.echo(url))
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130)
+    except (OSError, ValueError, RuntimeError) as exc:
+        typer.echo(f"Jupyter Lab起動エラー: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 @app.command()
 def get_app_name():
